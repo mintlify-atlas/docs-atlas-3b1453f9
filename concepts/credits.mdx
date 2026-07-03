@@ -1,0 +1,245 @@
+---
+title: "Credits: WZRD Studio AI Usage Metering"
+sidebarTitle: "Credits"
+description: "Credits are consumed for every AI generation in WZRD Studio. Learn how credits are charged per operation and how to manage your balance."
+---
+
+Credits are WZRD Studio's internal billing unit. Every time you generate an image, produce a video clip, synthesize audio, or run a Director's Cut, a fixed number of credits is deducted from your account balance. Credit costs are defined per model in the studio model catalog (`src/lib/studio-model-constants.ts`) and surfaced throughout the UI so you always know the cost before you click generate.
+
+## How Credits Are Charged
+
+Each generation operation maps to a specific credit cost determined by the model you select. The cost is fixed per call — it does not vary with output length except where noted.
+
+<CardGroup cols={2}>
+  <Card title="Image Generation" icon="image">
+    Charged once per generation request, regardless of how many images are returned. Default model **Nano Banana 2** costs **4 credits**.
+  </Card>
+  <Card title="Video Generation" icon="video">
+    Charged once per video clip. Default model **Kling O3 Standard T2V** costs **20 credits**. Premium models like Sora 2 Pro cost up to **50 credits**.
+  </Card>
+  <Card title="Audio & TTS" icon="music">
+    Charged per synthesis call. ElevenLabs TTS Turbo costs **4 credits**; most TTS models range from **2–4 credits**.
+  </Card>
+  <Card title="Director's Cut" icon="clapperboard">
+    A fixed **12 credits** per run, corresponding to the `fal-ai/ffmpeg-api/compose` model used to assemble the final video.
+  </Card>
+</CardGroup>
+
+## Credit Cost Reference
+
+### Image Models
+
+| Model | ID | Credits | Speed |
+|---|---|---|---|
+| FLUX Schnell | `fal-ai/flux/schnell` | 3 | ~3s |
+| Nano Banana 2 *(default)* | `fal-ai/nano-banana-2` | 4 | ~4s |
+| Flux 2 Flash | `fal-ai/flux-2/flash` | 4 | ~3s |
+| FLUX Dev | `fal-ai/flux/dev` | 5 | ~8s |
+| Ideogram V3 | `fal-ai/ideogram/v3` | 5 | ~8s |
+| Seedream 5 Lite | `fal-ai/seedream/v5/lite/text-to-image` | 5 | ~8s |
+| Qwen Image 2 | `fal-ai/qwen-image-2/text-to-image` | 5 | ~7s |
+| Flux 2 Turbo | `fal-ai/flux-2/turbo` | 5 | ~4s |
+| Flux 2 | `fal-ai/flux-2` | 6 | ~7s |
+| Qwen Image 2512 | `fal-ai/qwen-image-2512` | 6 | ~8s |
+| HiDream I1 | `fal-ai/hidream-i1-full` | 6 | ~10s |
+| Nano Banana Pro | `fal-ai/nano-banana-pro` | 7 | ~8s |
+| Qwen Image 2 Pro | `fal-ai/qwen-image-2/pro/text-to-image` | 7 | ~10s |
+| FLUX Kontext Pro | `fal-ai/flux-pro/kontext/text-to-image` | 7 | ~9s |
+| FLUX Pro Ultra | `fal-ai/flux-pro/v1.1-ultra` | 8 | ~10s |
+| Flux 2 Pro | `fal-ai/flux-2-pro` | 8 | ~10s |
+| GPT-Image 1.5 | `fal-ai/gpt-image-1.5` | 8 | ~10s |
+| Flux 2 Max | `fal-ai/flux-2-max` | 10 | ~12s |
+| Imagen 4 Ultra | `fal-ai/imagen4/preview/ultra` | 10 | ~12s |
+
+<Accordion title="GMI Cloud image models">
+
+| Model | ID | Credits | Speed |
+|---|---|---|---|
+| Seedream 5 Lite | `gmi/seedream-5.0-lite` | 2 | ~6s |
+| Seedream 5.0 | `gmi/seedream-5.0` | 3 | ~8s |
+| Gemini 3.1 Flash Image | `gmi/gemini-3.1-flash-image-preview` | 4 | ~10s |
+
+</Accordion>
+
+### Video Models
+
+| Model | ID | Credits | Speed |
+|---|---|---|---|
+| LTX Video | `fal-ai/ltx-video` | 16 | ~40s |
+| Seedance Lite T2V | `fal-ai/bytedance/seedance/v1/lite/text-to-video` | 18 | ~45s |
+| Kling O3 Standard T2V *(default)* | `fal-ai/kling-video/o3/standard/text-to-video` | 20 | ~45s |
+| Veo 3 Fast | `fal-ai/veo3/fast` | 25 | ~50s |
+| Kling 2.5 Turbo Pro I2V | `fal-ai/kling-video/v2.5-turbo/pro/image-to-video` | 22 | ~55s |
+| LTX 2.3 Pro T2V | `fal-ai/ltx-2.3/text-to-video` | 22 | ~60s |
+| Kling O3 Standard I2V | `fal-ai/kling-video/o3/standard/image-to-video` | 24 | ~60s |
+| MiniMax Video-01 Live | `fal-ai/minimax/video-01-live` | 25 | ~60s |
+| Veo 3 | `fal-ai/veo3` | 35 | ~100s |
+| Kling O3 Pro T2V | `fal-ai/kling-video/o3/pro/text-to-video` | 30 | ~90s |
+| Sora 2 | `fal-ai/sora-2/text-to-video` | 35 | ~120s |
+| Kling O3 Pro I2V | `fal-ai/kling-video/o3/pro/image-to-video` | 32 | ~100s |
+| Veo 3.1 | `fal-ai/veo3.1` | 40 | ~120s |
+| Sora 2 Pro | `fal-ai/sora-2/text-to-video/pro` | 50 | ~150s |
+
+### Audio Models
+
+| Model | ID | Credits | Category |
+|---|---|---|---|
+| MiniMax 2.8 Turbo | `fal-ai/minimax/speech-2.8-turbo` | 2 | TTS |
+| MiniMax Turbo | `fal-ai/minimax/speech-02-turbo` | 2 | TTS |
+| Chatterbox | `fal-ai/chatterbox/text-to-speech` | 2 | TTS |
+| Qwen 3 TTS | `fal-ai/qwen-3-tts/text-to-speech/1.7b` | 2 | TTS |
+| MiniMax Speech HD | `fal-ai/minimax/speech-02-hd` | 3 | TTS |
+| Kling TTS | `fal-ai/kling-video/v1/tts` | 3 | TTS |
+| ElevenLabs TTS Turbo *(default)* | `fal-ai/elevenlabs/tts/turbo-v2.5` | 4 | TTS |
+| CassetteAI Music | `cassetteai/music-generator` | 5 | Music |
+| Lyria 2 | `fal-ai/lyria2` | 6 | Music |
+
+### Text & Storyline Models
+
+| Model | ID | Credits |
+|---|---|---|
+| Gemini 3.1 Flash-Lite | `gmi/gemini-3.1-flash-lite` | 1 |
+| Llama 3.3 70B / 3.1 8B | `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` | 1 |
+| GLM 5.1 | `gmi/glm-5.1` | 2 |
+| OpenAI o4 Mini | `gmi/openai-o4-mini` | 3 |
+| DeepSeek R1 *(default text)* | `gmi/deepseek-r1` | 4 |
+| Claude Opus 4.7 | `gmi/claude-opus-4.7` | 5 |
+
+### Special Operations
+
+| Operation | Credits | Notes |
+|---|---|---|
+| **Director's Cut** | **12** | Runs `fal-ai/ffmpeg-api/compose` to assemble the final video from all shot assets |
+| Shot image (default model) | **4** | Uses `getShotImageCredits()` — falls back to default image model cost if none selected |
+| Shot video (default model) | **20** | Uses `getShotVideoCredits()` — falls back to default video model cost if none selected |
+
+<Note>
+  `DIRECTORS_CUT_CREDITS` is derived at runtime from `getModelCredits('fal-ai/ffmpeg-api/compose')` with a hard fallback of `12`. The shot helper functions `getShotImageCredits(modelId)` and `getShotVideoCredits(modelId)` perform the same lookup, falling back to the catalog defaults for the first image or video model respectively.
+</Note>
+
+## Checking Your Balance
+
+Your credit balance is visible in several places:
+
+- **Dashboard stats bar** — the **Credits** stat card on `/home` shows your available balance, updated on every page load via the `useCredits()` hook.
+- **Settings → Billing** — navigate to `/settings/billing` for a detailed breakdown of usage history, current plan, and top-up options.
+- **API** — poll `GET /functions/v1/billing-portal` to retrieve `{ subscription, credits }` programmatically.
+
+```typescript
+// Using the useCredits hook inside any React component
+import { useCredits } from '@/hooks/useCredits';
+
+const { availableCredits } = useCredits();
+console.log(`Available: ${availableCredits} credits`);
+```
+
+## What Happens at 0 Credits
+
+If a generation request is submitted when your balance is insufficient, the server returns HTTP `402 Payment Required` with the following JSON body:
+
+```json
+{
+  "code": "insufficient_credits",
+  "required": 20,
+  "available": 3,
+  "top_up_url": "https://..."
+}
+```
+
+On the client side, `unifiedGenerationService` catches this and throws an `InsufficientCreditsError`:
+
+```typescript
+import { InsufficientCreditsError } from '@/services/unifiedGenerationService';
+
+try {
+  const result = await unifiedGenerationService.generate(input);
+} catch (error) {
+  if (error instanceof InsufficientCreditsError) {
+    console.log(`Need ${error.required} credits, have ${error.available}`);
+    // The service automatically routes to the billing top-up page
+  }
+}
+```
+
+<Warning>
+  Generation requests are not queued when credits run out — they fail immediately. Top up your balance before submitting large batch operations like bulk shot generation or a Director's Cut.
+</Warning>
+
+## Topping Up Credits
+
+<Steps>
+  <Step title="Navigate to Billing">
+    Go to **Settings → Billing** at `/settings/billing`, or click **Billing &amp; Credits** in the dashboard settings dropdown.
+  </Step>
+  <Step title="Choose a plan or credit pack">
+    Select a subscription plan (`plan`) or a one-time credit pack (`pack`). Available codes include `pro` for the Pro plan and `pack_100` for a 100-credit top-up.
+  </Step>
+  <Step title="Complete Stripe checkout">
+    WZRD creates a Stripe Checkout session and opens it in your browser. Payment is handled entirely by Stripe — WZRD never stores card details.
+  </Step>
+  <Step title="Credits are applied instantly">
+    Once payment completes, your balance updates immediately. Poll `GET /functions/v1/billing-portal` to confirm the new credit total.
+  </Step>
+</Steps>
+
+### Billing API
+
+You can initiate a checkout session directly via the Supabase Edge Function if you are building an integration or automation:
+
+```bash
+# Start a Stripe checkout for a credit pack
+curl -X POST https://<project>.supabase.co/functions/v1/billing-checkout \
+  -H "Authorization: Bearer <supabase-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{ "kind": "pack", "code": "pack_100" }'
+
+# Response
+{ "checkout_url": "https://checkout.stripe.com/..." }
+```
+
+```bash
+# Poll plan and credit status
+curl https://<project>.supabase.co/functions/v1/billing-portal \
+  -H "Authorization: Bearer <supabase-jwt>"
+
+# Response
+{ "subscription": { ... }, "credits": 97 }
+```
+
+<Tip>
+  The `billing-checkout` agent skill wraps this endpoint for use in automated workflows. Pass `{ "kind": "plan" | "pack", "code": "pro" | "pack_100" }` to the skill and open the returned `checkout_url` in a browser window.
+</Tip>
+
+## Credit Cost Helpers
+
+The `src/lib/constants/credits.ts` module exports convenience functions for looking up and formatting credit costs anywhere in the codebase:
+
+```typescript
+import {
+  getModelCredits,
+  formatModelLabel,
+  formatModelLabelById,
+  getShotImageCredits,
+  getShotVideoCredits,
+  DIRECTORS_CUT_CREDITS,
+  IMAGE_CREDITS,
+  VIDEO_CREDITS,
+} from '@/lib/constants/credits';
+
+// Look up a model's credit cost by ID
+getModelCredits('fal-ai/flux/schnell');          // → 3
+getModelCredits('fal-ai/kling-video/o3/standard/text-to-video'); // → 20
+
+// Format for display in a dropdown
+formatModelLabelById('fal-ai/flux/schnell');     // → "FLUX Schnell (3 credits)"
+
+// Shot-level helpers (fall back to catalog defaults when no model selected)
+getShotImageCredits('fal-ai/nano-banana-2');     // → 4
+getShotVideoCredits();                           // → 20 (default video model)
+
+// Director's Cut cost
+console.log(DIRECTORS_CUT_CREDITS);             // → 12
+
+// Pre-built lookup maps (model ID → credits)
+console.log(IMAGE_CREDITS['fal-ai/flux/schnell']); // → 3
+```

@@ -1,5 +1,6 @@
 {
   "$schema": "https://mintlify.com/docs.json",
+<<<<<<< HEAD
   "theme": "mint",
   "name": "Mintlify Starter Kit",
   "colors": {
@@ -70,3 +71,107 @@
     }
   }
 }
+=======
+  "name": "WZRD Studio",
+  "theme": "luma",
+  "colors": {
+    "primary": "#7C3AED",
+    "light": "#EDE9FE",
+    "dark": "#0A0D16"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/gratitude5dee/wzrd-studio-desktopfinal"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/gratitude5dee/wzrd-studio-desktopfinal"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Overview",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/projects",
+              "concepts/credits",
+              "concepts/ai-models"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Features",
+        "groups": [
+          {
+            "group": "Creation Pipeline",
+            "pages": [
+              "features/studio-canvas",
+              "features/storyboard",
+              "features/directors-cut"
+            ]
+          },
+          {
+            "group": "Editing & Export",
+            "pages": [
+              "features/video-editor",
+              "features/clip-studio",
+              "features/kanvas"
+            ]
+          },
+          {
+            "group": "Publishing & Assets",
+            "pages": [
+              "features/postz",
+              "features/sourcify",
+              "features/ip-vault"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Developers",
+        "groups": [
+          {
+            "group": "Agent Integration",
+            "pages": [
+              "developers/mcp-server",
+              "developers/agent-skills",
+              "developers/voice-actions"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "developers/api/generation",
+              "developers/api/edge-functions",
+              "developers/api/deep-links"
+            ]
+          },
+          {
+            "group": "Desktop Shell",
+            "pages": [
+              "developers/electron/architecture",
+              "developers/electron/ipc-channels"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+>>>>>>> a29bec5 (docs: generate WZRD Studio documentation site)

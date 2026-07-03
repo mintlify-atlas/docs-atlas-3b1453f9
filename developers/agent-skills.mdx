@@ -1,0 +1,445 @@
+---
+title: "Agent Skills: Composable WZRD Automation Tasks"
+sidebarTitle: "Agent Skills"
+description: "Agent skills are documented, composable tasks that autonomous coding agents can discover and execute to automate WZRD Studio workflows."
+---
+
+Agent skills are the building blocks of WZRD Studio automation. Each skill is a self-contained, documented task — a pairing of a Markdown specification and an MCP tool registration — that any compliant agent harness can discover via `agent-skills/index.json` and call through the [MCP server](/developers/mcp-server). Because skills are plain files in the repo, you can fork, extend, or compose them without touching application code.
+
+## Skills Manifest
+
+The manifest lives at `agent-skills/index.json` and is read by all four supported harnesses (Claude Code, Codex, OpenClaw, Hermes) as well as the MCP server's `tools/list` response.
+
+```json
+{
+  "version": "1.0",
+  "skills": [
+    {
+      "id": "list-models",
+      "title": "List available models with credits",
+      "description": "Read the WZRD model catalog including credit cost.",
+      "doc": "agent-skills/list-models/skill.md",
+      "mcp_tool": "list_models"
+    },
+    {
+      "id": "generate-shot",
+      "title": "Generate a shot via SSE stream",
+      "description": "Stream image/video generation for a single shot.",
+      "doc": "agent-skills/generate-shot/skill.md",
+      "mcp_tool": "start_shot_stream"
+    }
+  ]
+}
+```
+
+Each entry has:
+
+<ResponseField name="id" type="string" required>
+  Kebab-case identifier. Matches the directory name under `agent-skills/`.
+</ResponseField>
+<ResponseField name="title" type="string" required>
+  Human-readable skill name shown in agent UIs and the MCP tool list.
+</ResponseField>
+<ResponseField name="description" type="string" required>
+  One-sentence summary used as the MCP tool's `description` field.
+</ResponseField>
+<ResponseField name="doc" type="string" required>
+  Repo-relative path to the canonical `skill.md` specification.
+</ResponseField>
+<ResponseField name="mcp_tool" type="string" required>
+  The MCP tool name passed to `tools/call` → `params.name`.
+</ResponseField>
+
+## All Seven Skills
+
+<Accordion title="list-models — Read the AI Model Catalog">
+  Returns the catalog of generation models available in WZRD Studio, including credit cost per call, provider, and media type.
+
+  **MCP tool:** `list_models`
+
+  **Endpoint:** `GET https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/model-catalog`
+
+  **Authentication:** Optional — pass a Bearer JWT for user-tier sorting.
+
+  ### Input Parameters
+
+  <ParamField query="mediaType" type="string">
+    Filter by media type. Accepted values: `text`, `image`, `video`, `audio`.
+  </ParamField>
+  <ParamField query="provider" type="string">
+    Filter by provider name, e.g. `gmi-cloud`, `fal.ai`.
+  </ParamField>
+
+  ### Example Response
+
+  ```json
+  {
+    "models": [
+      {
+        "id": "gmi/seedream-5.0-lite",
+        "name": "Seedream 5 Lite",
+        "credits": 2,
+        "media_type": "image",
+        "provider": "gmi-cloud"
+      }
+    ]
+  }
+  ```
+
+  ### Errors
+
+  | Code | Meaning |
+  |---|---|
+  | `500` | Catalog refresh failed — retry after a brief delay. |
+</Accordion>
+
+<Accordion title="generate-shot — Stream Single-Shot Generation">
+  Streams image or video generation progress for a single timeline shot. The response is a `text/event-stream` of JSON events ending with `type: "complete"` or `type: "error"`.
+
+  **MCP tool:** `start_shot_stream`
+
+  **Endpoint:** `POST /functions/v1/gen-shots`
+
+  **Authentication:** Required — Supabase JWT Bearer token.
+
+  ### Request Body
+
+  <ParamField body="shot_id" type="string" required>
+    UUID of the shot to generate.
+  </ParamField>
+  <ParamField body="model_id" type="string" required>
+    Model identifier from the catalog, e.g. `gmi/ltx-fast-i2v`.
+  </ParamField>
+
+  ```json
+  { "shot_id": "8b2e1f04-...", "model_id": "gmi/ltx-fast-i2v" }
+  ```
+
+  ### SSE Event Stream
+
+  ```
+  data: {"type":"progress","progress":0.25}
+  data: {"type":"progress","progress":0.75}
+  data: {"type":"complete","asset_url":"https://..."}
+  ```
+
+  <ResponseField name="type" type="string">
+    `progress` | `complete` | `error`
+  </ResponseField>
+  <ResponseField name="progress" type="number">
+    Generation progress from `0` to `1`.
+  </ResponseField>
+  <ResponseField name="asset_url" type="string">
+    Signed CDN URL of the generated asset, present on `complete` events.
+  </ResponseField>
+
+  ### Errors
+
+  | Code | Meaning |
+  |---|---|
+  | `402` | Insufficient credits. Payload includes `{ code, required, available, top_up_url }`. |
+  | `422` | Invalid shot/model combination (e.g. a video model called on an image-only shot). |
+</Accordion>
+
+<Accordion title="render-timeline — Auto-Generate Every Shot in a Project">
+  Triggers the project-wide auto-generate workflow. Run the `images` phase first to create reference frames, then the `videos` phase to animate them. Both phases execute shots in parallel and stream progress over SSE.
+
+  **MCP tool:** `render_timeline`
+
+  **Endpoint:** `POST /functions/v1/project-auto-generate`
+
+  **Authentication:** Required — Supabase JWT Bearer token.
+
+  ### Request Body
+
+  <ParamField body="project_id" type="string" required>
+    UUID of the project whose shots should be rendered.
+  </ParamField>
+  <ParamField body="phase" type="string" required>
+    `"images"` to generate still frames, or `"videos"` to animate them.
+  </ParamField>
+
+  ```json
+  { "project_id": "3c7a9e12-...", "phase": "images" }
+  ```
+
+  ### Polling Progress
+
+  After submitting, poll the project-scoped SSE stream:
+
+  ```bash
+  curl -N \
+    "https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/project-auto-generate/stream?project_id=3c7a9e12-..." \
+    -H "Authorization: Bearer <jwt>"
+  ```
+
+  ### Recommended Sequence
+
+  <Steps>
+    <Step title="Check credits">
+      Call `get_credits` first. Image generation costs credits per shot; video generation costs more. A project with 20 shots requires credits for all 40 operations.
+    </Step>
+    <Step title="Run images phase">
+      `POST /project-auto-generate` with `phase: "images"`. Poll SSE until all shots report `complete`.
+    </Step>
+    <Step title="Run videos phase">
+      `POST /project-auto-generate` with `phase: "videos"`. Each shot uses its generated image as a reference frame.
+    </Step>
+  </Steps>
+</Accordion>
+
+<Accordion title="run-studio-graph — Execute a Saved Compute Graph">
+  Executes a saved WZRD Studio node graph for a project, running nodes in dependency order. The response streams per-node status events so the agent can report fine-grained progress.
+
+  **MCP tool:** `run_studio_graph`
+
+  **Endpoint:** `POST /functions/v1/compute-execute`
+
+  **Authentication:** Required — Supabase JWT Bearer token.
+
+  ### Request Body
+
+  <ParamField body="project_id" type="string" required>
+    UUID of the project whose saved compute graph should be executed.
+  </ParamField>
+  <ParamField body="auth_token" type="string" required>
+    The user's Supabase JWT (forwarded by the MCP server to the edge function).
+  </ParamField>
+
+  ```json
+  { "project_id": "3c7a9e12-...", "auth_token": "eyJ..." }
+  ```
+
+  ### Event Stream
+
+  ```
+  data: {"node_id":"noise-gen-01","status":"running","progress":0.1}
+  data: {"node_id":"noise-gen-01","status":"complete","artifacts":["https://..."]}
+  data: {"node_id":"composite-02","status":"running","progress":0.5}
+  data: {"node_id":"composite-02","status":"complete","artifacts":["https://..."]}
+  ```
+
+  <ResponseField name="node_id" type="string">
+    Graph node identifier as defined in the Studio canvas.
+  </ResponseField>
+  <ResponseField name="status" type="string">
+    `running` | `complete` | `error`
+  </ResponseField>
+  <ResponseField name="artifacts" type="string[]">
+    Signed CDN URLs of outputs produced by this node.
+  </ResponseField>
+</Accordion>
+
+<Accordion title="make-magic — End-to-End Project to Director's Cut">
+  The highest-level skill. Accepts a raw concept and format string, creates a project, generates a full storyline, renders all shots, and produces a final Director's Cut video — all in a single automated pipeline. Each step deducts credits; call `get_credits` before starting.
+
+  **MCP tool:** `make_magic`
+
+  ### Pipeline Steps
+
+  <Steps>
+    <Step title="Create the project">
+      `POST /functions/v1/project-create` with `{ concept, format }` → returns `project_id`.
+
+      ```json
+      {
+        "concept": "A lone astronaut discovers a signal on Europa",
+        "format": "short-film"
+      }
+      ```
+    </Step>
+    <Step title="Poll storyline status">
+      `GET /functions/v1/storyline-status?project_id=<id>` — poll until status is `complete`. The API generates scene breakdowns and shot prompts automatically.
+    </Step>
+    <Step title="Auto-generate all shots">
+      Call `/project-auto-generate` with `phase: "images"`, wait for completion, then `phase: "videos"`.
+    </Step>
+    <Step title="Trigger Director's Cut">
+      `POST /functions/v1/directors-cut` with `{ project_id }` to start the assembly edit.
+    </Step>
+    <Step title="Poll for final URL">
+      `GET /functions/v1/directors-cut/status?project_id=<id>` — poll until `final_url` is present in the response body.
+    </Step>
+  </Steps>
+
+  <Warning>
+    Each step deducts credits independently. If the agent is interrupted after step 3, credits for generation have already been spent. Check `/billing/credits` before initiating and surface any `402` errors immediately.
+  </Warning>
+</Accordion>
+
+<Accordion title="billing-checkout — Create Checkout & Poll Plan Status">
+  Launches a Stripe-hosted billing checkout for a plan upgrade or a credit pack purchase. After the user completes checkout, poll the billing portal to confirm the subscription or credit balance has updated.
+
+  **MCP tool:** `create_checkout_session`
+
+  **Endpoint:** `POST /functions/v1/billing-checkout`
+
+  **Authentication:** Required — Supabase JWT Bearer token.
+
+  ### Request Body
+
+  <ParamField body="kind" type="string" required>
+    `"plan"` to upgrade a subscription tier, or `"pack"` to purchase a credit pack.
+  </ParamField>
+  <ParamField body="code" type="string" required>
+    Plan or pack identifier, e.g. `"pro"`, `"enterprise"`, or `"pack_100"`.
+  </ParamField>
+  <ParamField body="auth_token" type="string" required>
+    The user's Supabase JWT forwarded by the MCP server.
+  </ParamField>
+
+  ```json
+  { "kind": "plan", "code": "pro", "auth_token": "eyJ..." }
+  ```
+
+  ### Response
+
+  ```json
+  { "checkout_url": "https://checkout.stripe.com/pay/cs_live_..." }
+  ```
+
+  Open `checkout_url` in the user's browser. Do not embed it in an iframe.
+
+  ### Polling Plan Status
+
+  ```bash
+  GET /functions/v1/billing-portal
+  Authorization: Bearer <jwt>
+  ```
+
+  Returns `{ subscription, credits }`. Poll until `subscription.plan` matches the purchased tier or `credits` reflects the newly purchased pack.
+</Accordion>
+
+<Accordion title="edit-timeline — Drive the QCut Editor via MCP">
+  Controls the QCut multi-track editor timeline when **WZRD Studio Desktop** is running and the `/projects/:projectId/editor` page is open. This skill exposes a command API for importing clips, arranging the timeline, adding titles, and exporting — all performable by an agent and fully undoable by the user.
+
+  **MCP tool:** `edit_timeline`
+
+  ### Prerequisites
+
+  The desktop app must be running with the `/editor` route mounted. The editor hosts a local JSON-RPC 2.0 MCP server on:
+
+  ```
+  http://127.0.0.1:32145
+  ```
+
+  If port 32145 is unavailable the server falls back to a random local port. Query the current address from DevTools:
+
+  ```javascript
+  window.wzrdQcut.mcp.getInfo()
+  // → { port: 32145, authorizationHeader: "Bearer wzrd-qcut-..." }
+  ```
+
+  ### Authentication
+
+  Include the local auth token on every request using **one** of:
+
+  - `Authorization: Bearer <token>` *(recommended)*
+  - `x-wzrd-qcut-token: <token>`
+
+  ### Commands
+
+  <ParamField body="command" type="string" required>
+    One of: `importMediaByUrl`, `addClip`, `addText`, `splitElement`, `deleteElement`, `export`, `getExportStatus`
+  </ParamField>
+  <ParamField body="args" type="object" required>
+    Command-specific arguments (see examples below).
+  </ParamField>
+
+  **Import a clip by URL**
+  ```json
+  {
+    "command": "importMediaByUrl",
+    "args": { "url": "https://cdn.example.com/clip.mp4", "name": "Intro" }
+  }
+  ```
+
+  **Add clip to timeline**
+  ```json
+  {
+    "command": "addClip",
+    "args": { "mediaId": "<id from importMediaByUrl>", "startTime": 0 }
+  }
+  ```
+
+  **Split an element at a timestamp**
+  ```json
+  {
+    "command": "splitElement",
+    "args": { "trackId": "<trackId>", "elementId": "<elementId>", "splitTime": 3 }
+  }
+  ```
+
+  **Add a title card**
+  ```json
+  {
+    "command": "addText",
+    "args": { "content": "Act One", "startTime": 0, "duration": 4 }
+  }
+  ```
+
+  **Export to 720p MP4**
+  ```json
+  {
+    "command": "export",
+    "args": { "preset": "720p", "format": "mp4", "filename": "my-film-720p.mp4" }
+  }
+  ```
+
+  **Check export status**
+  ```json
+  {
+    "command": "getExportStatus",
+    "args": {}
+  }
+  ```
+
+  <Note>
+    All agent edits flow through QCut's internal command and history system, meaning every change is fully undoable by the user with Cmd+Z.
+  </Note>
+</Accordion>
+
+## Adding a Custom Skill
+
+Custom skills follow the same structure as built-in ones. The agent harnesses and MCP server pick them up automatically on next launch.
+
+<Steps>
+  <Step title="Create the skill directory and spec">
+    Create `agent-skills/<your-skill-id>/skill.md` with a header, endpoint, auth requirements, request body, and response description.
+
+    ```markdown
+    # Skill: my-custom-skill
+
+    Short description of what this skill does.
+
+    **Endpoint**: `POST /functions/v1/my-function`
+    **Auth**: required (Supabase JWT)
+    **Body**: `{ "project_id": "uuid", "param": "value" }`
+
+    ## Response
+    \`\`\`json
+    { "result": "..." }
+    \`\`\`
+    ```
+  </Step>
+  <Step title="Register the skill in index.json">
+    Add an entry to `agent-skills/index.json`:
+
+    ```json
+    {
+      "id": "my-custom-skill",
+      "title": "My Custom Skill",
+      "description": "One-sentence description for the MCP tool list.",
+      "doc": "agent-skills/my-custom-skill/skill.md",
+      "mcp_tool": "my_custom_skill"
+    }
+    ```
+  </Step>
+  <Step title="Implement the Edge Function (optional)">
+    If your skill calls a new backend endpoint, add it under `supabase/functions/my-function/index.ts`. The `agents.md` allowlist permits editing all files under `supabase/functions/`.
+  </Step>
+</Steps>
+
+<Tip>
+  Keep skill IDs in `kebab-case` and MCP tool names in `snake_case`. This matches the conventions used by all seven built-in skills and ensures harness auto-discovery works without configuration.
+</Tip>

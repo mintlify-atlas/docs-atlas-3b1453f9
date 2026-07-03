@@ -1,4 +1,5 @@
 ---
+<<<<<<< HEAD
 title: "Quickstart"
 description: "Begin with a guide on the fastest path to a successful outcome"
 ---
@@ -45,3 +46,113 @@ Before you begin, you must have:
 
   Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
 </Tip>
+=======
+title: "Get Started with WZRD Studio in 5 Minutes"
+sidebarTitle: "Quickstart"
+description: "Create your first AI video project in WZRD Studio: set up credentials, launch the app, generate a storyboard, and export your first clip."
+---
+
+This guide takes you from a fresh install to your first exported AI video clip. You'll configure your environment, launch the app, generate storyboard shots, run Director's Cut, and export from the video editor — all in about five minutes.
+
+<Note>
+  AI generation requires credits in your WZRD Studio account. If you haven't added credits yet, see the [Credits guide](/concepts/credits) before continuing with steps 5 and 6.
+</Note>
+
+<Steps>
+  <Step title="Install WZRD Studio">
+    If you haven't installed the app yet, follow the [Installation guide](/installation) to:
+    - Download and mount `wzrdstudiofinal555-apfs.dmg`.
+    - Drag **WZRD Studio.app** to Applications.
+    - Bypass Gatekeeper on first launch.
+
+    Come back here once the app opens successfully.
+  </Step>
+
+  <Step title="Configure your environment variables">
+    Create a `.env` file in the project root (required for development mode; bundled builds read from the built-in configuration):
+
+    ```bash
+    # .env
+    VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+    VITE_SUPABASE_ANON_KEY=<your-supabase-anon-key>
+    VITE_THIRDWEB_CLIENT_ID=<your-thirdweb-client-id>
+    ```
+
+    Find these values in:
+    - **Supabase** → Project Settings → API → Project URL and anon/public key.
+    - **Thirdweb** → [dashboard.thirdweb.com](https://thirdweb.com/dashboard) → your project → Client ID.
+
+    <Warning>
+      Never commit your `.env` file to version control. The `.gitignore` already excludes it, but double-check before pushing to a shared repository.
+    </Warning>
+  </Step>
+
+  <Step title="Launch the app">
+    **From the DMG install:**
+    Open **WZRD Studio.app** from your Applications folder. If macOS blocks the launch, right-click the app icon and select **Open**.
+
+    **From source (development mode):**
+    ```bash
+    bun run desktop:dev
+    ```
+    This starts both the Vite dev server and the Electron shell with live reload enabled. The app window opens automatically once the renderer is ready.
+  </Step>
+
+  <Step title="Sign in and create a project">
+    1. On the login screen, connect your wallet using one of the available methods — Google, Apple, Discord, email, passkey, or phone — via the Thirdweb in-app wallet.
+    2. The app exchanges your wallet token for a Supabase session automatically. You'll be redirected to the **Home dashboard** once authenticated.
+    3. Click **New Project** on the Home dashboard.
+    4. Give your project a name and optionally add a brief description or logline. Click **Create**.
+
+    You'll land on the **Studio Canvas** — a node-based workspace where your project lives.
+  </Step>
+
+  <Step title="Generate storyboard shots">
+    1. In the Studio Canvas, click **Add Node** (or press `N`) and select **Storyboard Shot**.
+    2. Type a prompt describing your first shot — for example: *"Wide establishing shot of a neon-lit Tokyo alley at dusk, cinematic, 4K."*
+    3. Click **Generate**. WZRD Studio sends the prompt to the configured AI provider and returns a visual panel for that shot.
+    4. Repeat for each shot in your sequence. Drag nodes to arrange them spatially — left to right typically maps to chronological order.
+
+    <Tip>
+      Connect nodes by dragging from the output handle of one storyboard shot to the input handle of the next. This wires the narrative flow and lets Director's Cut assemble shots in the correct order automatically.
+    </Tip>
+  </Step>
+
+  <Step title="Run Director's Cut">
+    Once you have at least two connected storyboard shots:
+
+    1. Click **Director's Cut** in the top toolbar (or press `Cmd + D`).
+    2. WZRD Studio analyzes the node graph, sequences your shots, proposes transitions, and generates a rough cut.
+    3. A preview of the assembled cut appears in the Director's Cut panel. Review the proposed sequence and adjust any transition types or durations inline.
+    4. Click **Accept Cut** to promote the rough cut to the Video Editor.
+
+    Director's Cut reads the wired connections between your nodes, so shots that aren't connected may be excluded from the assembly. Make sure your narrative flow is fully wired before running.
+  </Step>
+
+  <Step title="Export from the Video Editor">
+    After accepting the Director's Cut, the **QCut Video Editor** opens with your assembled timeline:
+
+    1. Review the multi-track timeline. Drag clip edges to trim in/out points, or drag clips horizontally to adjust their position.
+    2. Use the waveform view to align cuts to audio beats if you've added a music track.
+    3. When the cut is ready, click **Export** in the top-right corner.
+    4. Choose a resolution, format, and destination folder. Click **Render**.
+
+    The Remotion render pipeline compiles your timeline to a video file and saves it to your chosen location. A system notification appears when rendering is complete.
+
+    <Tip>
+      Your exported clip is also automatically attached to the current project as an asset. You can publish it directly to social channels without leaving the app — open **Postz** from the sidebar to schedule or publish immediately.
+    </Tip>
+  </Step>
+</Steps>
+
+## Next Steps
+
+Now that you've created your first clip, explore the deeper capabilities of each stage:
+
+- **[Studio Canvas](/features/studio-canvas)** — Learn how to build branching node graphs for multi-variant generation.
+- **[Storyboard](/features/storyboard)** — Advanced prompting techniques and shot reference images.
+- **[Director's Cut](/features/directors-cut)** — Customizing assembly rules and transition libraries.
+- **[Video Editor](/features/video-editor)** — QCut keyboard shortcuts, color grading, and audio mixing.
+- **[Postz](/features/postz)** — Connecting social channels and scheduling a publish calendar.
+- **[MCP Server](/developers/mcp-server)** — Automating project workflows with AI coding agents.
+>>>>>>> a29bec5 (docs: generate WZRD Studio documentation site)

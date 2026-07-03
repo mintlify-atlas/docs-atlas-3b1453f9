@@ -1,0 +1,271 @@
+---
+title: "Sourcify: Web Scraping and Asset Pipeline"
+sidebarTitle: "Sourcify"
+description: "Sourcify scrapes web content and structures it into WZRD project assets using Apify under the hood. Search, select, and import content directly into your projects."
+---
+
+Sourcify turns any keyword, hashtag, creator handle, or video URL into a curated library of reference media — all without leaving WZRD Studio. Type a topic, let the AI-powered Codex planner pick the right scraping actors, review the results in a browsable grid, and finalize the items you want directly into your project's asset library. Sourcify is purpose-built for gathering shot references, building mood boards, and stockpiling source clips before a production run.
+
+## Route
+
+`/sourcify`
+
+## How It Works
+
+Sourcify is built on [Apify](https://apify.com/) — a cloud web-scraping platform that runs pre-built actors for each social platform. The `sourcify-apify` Supabase edge function sits between the WZRD client and Apify, handling plan generation, actor orchestration, result normalisation, and asset persistence.
+
+```
+Client → sourcify-apify edge function → Apify Actor → Apify Dataset
+                                      ↓
+                               Structured SourcifyResult[]
+                                      ↓
+                          Supabase Storage (project-assets)
+                                      ↓
+                           project_assets table row
+```
+
+## Supported Platforms and Actors
+
+<CardGroup cols={2}>
+  <Card title="YouTube Fast" icon="youtube">
+    Broad YouTube channel, search-result, and playlist scraping. Best default for long-form video metadata. Actor ID: `gXSReGYeawn5nwDhI`.
+  </Card>
+  <Card title="YouTube Shorts" icon="youtube">
+    Same underlying actor, tuned with `duration: "s"` and `includeShorts: true` for short-form YouTube discovery.
+  </Card>
+  <Card title="YouTube Downloader" icon="download">
+    Downloads direct MP4 streams (720p) from individual YouTube watch or Shorts URLs. Only activated when a direct video URL is supplied. Actor ID: `y1IMcEPawMQPafm02`.
+  </Card>
+  <Card title="Instagram Fast" icon="instagram">
+    Public profiles, hashtags, Reels discovery, and engagement metadata. Actor ID: `VLKR1emKm1YGLmiuZ`.
+  </Card>
+  <Card title="Instagram Reels Downloader" icon="instagram">
+    Downloads high-quality Reel media from a direct `/reel/` URL. Actor ID: `Fj1zYgto86GELL443`.
+  </Card>
+  <Card title="TikTok Fast" icon="tiktok">
+    Hashtags, creator profiles, keyword searches, and direct video URLs. Actor ID configurable via `SOURCIFY_TIKTOK_ACTOR_ID`.
+  </Card>
+  <Card title="Twitch Video" icon="twitch">
+    Twitch VOD and clip metadata. Activated when a `twitch.tv` URL is detected. Actor ID: `bqneowjFSQBmAkILW`.
+  </Card>
+</CardGroup>
+
+## Core Workflow
+
+<Steps>
+  <Step title="Enter a topic or URL">
+    Type any of the following into the **Codex source query** box:
+
+    - A keyword or phrase: `"cinematic creator clips"`
+    - A hashtag: `#shortfilm`
+    - A creator handle: `@username`
+    - A direct video URL from YouTube, Instagram, or TikTok
+    - A natural-language prompt describing the content you want
+
+    Press `Cmd+Enter` or click **Plan sources** to proceed.
+  </Step>
+  <Step title="Review the Codex plan">
+    The `sourcify-apify` function calls the **Codex planner** — an OpenAI Responses API call with a structured JSON schema — to decompose your prompt into 1–5 focused scrape targets. Each target is matched to the most appropriate Apify actors.
+
+    If the Codex planner is unavailable (no API key, or rate-limited), the function falls back to a **deterministic plan** that constructs sensible actor inputs directly from the topic string.
+
+    The assistant's explanation of the plan appears as a blue callout below the query box.
+  </Step>
+  <Step title="Select actors and run">
+    The **Actors** panel on the right lists all planned actors grouped by target. Toggle individual actors on or off before running. Actors that are not configured (missing Actor ID or incorrect URL input type) are shown as disabled with an explanatory note.
+
+    Click **Run selected scrapes** to start the Apify runs. Each actor run fires sequentially. Results stream into the grid as runs complete.
+  </Step>
+  <Step title="Browse and filter results">
+    Results are displayed in a responsive card grid, grouped first by platform (`youtube`, `tiktok`, `instagram`, `twitch`) then by content category (`video`, `short`, `reel`, `clip`, `profile`, `metadata`).
+
+    Use the platform filter pills to narrow the view. Each card shows:
+
+    - Thumbnail with hover-to-preview (inline video for direct MP4s, embedded YouTube iframe for watch URLs)
+    - Title, creator, platform, and category badges
+    - Downloadable / metadata status
+    - Engagement metrics (views, likes, comments, shares)
+    - Dataset and run IDs for provenance tracing
+    - An **Open source** link to the original page
+  </Step>
+  <Step title="Fetch MP4 downloads (optional)">
+    Results that have a source URL but no direct media file show a **Fetch MP4** button. Clicking it (or using the toolbar **Fetch MP4s** button for a batch) triggers a second Apify run using the dedicated downloader actors:
+
+    - YouTube URLs → `youtube-downloader`
+    - Instagram Reel URLs → `instagram-reels`
+    - TikTok video URLs → `tiktok-fast` with `shouldDownloadVideos: true`
+
+    Successfully fetched results are updated in-place with the direct media URL.
+
+    <Warning>
+      Fetching MP4s triggers paid Apify actor runs. A maximum of **12 items** are processed per batch to control costs. You can adjust the **Max charge (USD)** setting to cap total Apify spend per scrape session.
+    </Warning>
+  </Step>
+  <Step title="Finalize or add to library">
+    Select one or more results using the checkboxes on each card (or **Select all** in the toolbar), then choose an action:
+
+    | Action | Effect |
+    |---|---|
+    | **Add to library** | Downloads each result's media to Supabase Storage and creates a `project_assets` row with `asset_category: "upload"` |
+    | **Finalize** | Same as above but marks the asset with `asset_category: "finalized"`, making it available in the Postz sidebar for immediate scheduling |
+    | **Download MP4s** | Saves direct-MP4 results to your local machine without storing them in the project |
+
+    Finalized results display a green `finalized` badge on their card. Skipped items (no downloadable URL, download errors) are reported as a warning toast.
+  </Step>
+</Steps>
+
+## Settings
+
+Configure scraping behaviour using the controls in the query panel:
+
+<ParamField path="maxItems" type="number" default="50">
+  Maximum number of items to fetch per actor run. Clamped between 1 and 1,000.
+</ParamField>
+
+<ParamField path="maxTotalChargeUsd" type="number" default="5">
+  Apify billing cap in USD per run. Passed directly to the Apify actor as `maxTotalChargeUsd`.
+</ParamField>
+
+<ParamField path="waitForFinishSecs" type="number" default="30">
+  Seconds to wait for the Apify run to complete before returning. Capped at 60. Runs that are not terminal when the wait expires return an empty `results` array — you can fetch their dataset later using the `results` action.
+</ParamField>
+
+<ParamField path="includeDownloadableOnly" type="boolean" default="false">
+  When enabled, filters results to only those with a resolved `mediaUrl` (a direct downloadable file). Useful for building shot-reference packages that are ready to import immediately.
+</ParamField>
+
+## Edge Function: `sourcify-apify`
+
+The edge function accepts `POST` requests with a JSON body. All actions require authentication.
+
+<Tabs>
+  <Tab title="plan">
+    Generates a scraping plan without running any actors. Uses the Codex planner when `OPENAI_API_KEY` and `WZRD_AGENT_PROVIDER=codex` are configured; otherwise falls back to a deterministic plan.
+
+    ```json
+    {
+      "action": "plan",
+      "topic": "cinematic creator clips",
+      "settings": {
+        "maxItems": 50,
+        "maxTotalChargeUsd": 5,
+        "waitForFinishSecs": 30,
+        "includeDownloadableOnly": false
+      }
+    }
+    ```
+
+    Returns a `SourcifyPlan` containing `targets` (1–5), each with its own `actors` array and `rationale` from the AI planner.
+  </Tab>
+  <Tab title="run">
+    Executes a single Apify actor and returns normalised results.
+
+    ```json
+    {
+      "action": "run",
+      "topic": "cinematic creator clips",
+      "actorKey": "youtube-fast",
+      "input": {
+        "startUrls": ["https://www.youtube.com/results?search_query=cinematic+creator+clips"],
+        "maxItems": 50,
+        "sort": "r"
+      },
+      "settings": { "waitForFinishSecs": 30 }
+    }
+    ```
+
+    Returns `{ runId, datasetId, status, usageTotalUsd, results: SourcifyResult[] }`.
+  </Tab>
+  <Tab title="results">
+    Fetches items from an existing Apify dataset, useful for polling a run that was still in progress when `run` returned.
+
+    ```json
+    {
+      "action": "results",
+      "datasetId": "<apify-dataset-id>",
+      "actorKey": "youtube-fast",
+      "settings": { "maxItems": 100 }
+    }
+    ```
+  </Tab>
+  <Tab title="finalize">
+    Downloads media files from selected results, uploads them to the `project-assets` Supabase Storage bucket, and creates `project_assets` table rows with full Sourcify provenance metadata.
+
+    ```json
+    {
+      "action": "finalize",
+      "projectId": "<optional-project-uuid>",
+      "assetCategory": "finalized",
+      "results": [
+        {
+          "id": "youtube-fast-abc123",
+          "platform": "youtube",
+          "title": "My Reference Clip",
+          "mediaUrl": "https://...",
+          "sourceUrl": "https://youtube.com/watch?v=...",
+          "thumbnailUrl": "https://...",
+          "metrics": { "views": 120000 }
+        }
+      ]
+    }
+    ```
+
+    File size is capped at **500 MB** per item. Returns `{ success, assets, skipped }`.
+  </Tab>
+</Tabs>
+
+## Result Card Details
+
+Each `SourcifyResult` item carries the following fields after normalisation:
+
+```typescript
+type SourcifyResult = {
+  id: string;
+  platform: "youtube" | "tiktok" | "instagram" | "twitch" | "unknown";
+  actorKey?: ActorKey;
+  category: "video" | "short" | "reel" | "clip" | "profile" | "metadata";
+  title: string;
+  creator?: string;
+  sourceUrl?: string;       // original page URL
+  mediaUrl?: string;        // direct downloadable file URL (if available)
+  thumbnailUrl?: string;
+  durationSeconds?: number;
+  publishedAt?: string;
+  metrics: {
+    views?: number;
+    likes?: number;
+    comments?: number;
+    shares?: number;
+  };
+  downloadable: boolean;    // true when mediaUrl resolves to a direct file
+  runId?: string;           // Apify run provenance
+  datasetId?: string;
+  topic?: string;
+  scrapedAt?: string;
+};
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Shot Reference Packages" icon="film">
+    Search for a visual style, select the best thumbnails and Reels, and finalize them into your project in one flow. All provenance metadata (source URL, platform, run ID) is preserved in the asset record.
+  </Card>
+  <Card title="Trend Research" icon="chart-line">
+    Use engagement metrics (views, likes, shares) to identify high-performing content in your niche before planning a production.
+  </Card>
+  <Card title="Content Repurposing Prep" icon="arrows-rotate">
+    Fetch direct MP4 downloads of your own published content (from your channel handle) to re-import into WZRD for remixing or re-editing.
+  </Card>
+  <Card title="Postz Asset Pipeline" icon="calendar">
+    Finalize Sourcify assets to make them immediately available in the Postz finalized-asset panel, ready to attach to scheduled posts.
+  </Card>
+</CardGroup>
+
+<Note>
+  Sourcify requires an **Apify API token** configured as the `APIFY_API_TOKEN` environment variable on the edge function. Without it, `plan` will succeed (Codex planning is independent), but `run` and `results` actions will return an error.
+</Note>
+
+<Tip>
+  For natural-language prompts that span multiple platforms (e.g. "find me the top cinematic videos on YouTube and trending Reels on Instagram about urban photography"), the Codex planner will generate separate targets for each platform and select the appropriate actors for each — saving you from having to configure each actor manually.
+</Tip>

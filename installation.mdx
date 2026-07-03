@@ -1,0 +1,151 @@
+---
+title: "Install WZRD Studio on macOS"
+sidebarTitle: "Installation"
+description: "Download, install, and launch the WZRD Studio desktop app on Apple Silicon Macs. Includes Gatekeeper bypass and environment setup steps."
+---
+
+WZRD Studio ships as an unsigned APFS DMG targeting **macOS Apple Silicon**. The steps below walk you through installing the pre-built DMG, bypassing Gatekeeper on first launch, configuring your environment, and optionally running the app from source for development.
+
+## Requirements
+
+Before you begin, confirm your machine meets the following requirements:
+
+| Requirement | Minimum |
+|---|---|
+| macOS architecture | Apple Silicon (`arm64`) |
+| Runtime | [Bun](https://bun.sh) (latest) |
+| Node.js | Compatible with the project toolchain (see `package.json`) |
+| Supabase project | Active project with `ANON_KEY` and `URL` available |
+| Thirdweb project | Client ID from [thirdweb.com/dashboard](https://thirdweb.com/dashboard) |
+
+<Warning>
+  Intel Macs are not supported. The packaged DMG is built exclusively for the `arm64` architecture via `electron-builder --mac dir --arm64`.
+</Warning>
+
+## DMG Installation
+
+<Steps>
+  <Step title="Download the DMG">
+    Obtain `wzrdstudiofinal555-apfs.dmg` — either from the releases page or by [building it yourself](#build-the-dmg-from-source).
+  </Step>
+  <Step title="Mount the DMG">
+    Double-click `wzrdstudiofinal555-apfs.dmg`. A Finder window opens showing the **WZRD Studio.app** bundle alongside an **Applications** shortcut.
+  </Step>
+  <Step title="Drag to Applications">
+    Drag **WZRD Studio.app** into the **Applications** folder shortcut in the DMG window.
+  </Step>
+  <Step title="Eject the DMG">
+    Eject the mounted disk image from the Finder sidebar or desktop.
+  </Step>
+  <Step title="Bypass Gatekeeper on first launch">
+    Because the DMG is unsigned and unnotarized, macOS will block the first launch with a security warning. Use one of the following methods to open the app:
+
+    **Option A — Right-click to open:**
+    1. Navigate to **Applications**.
+    2. Right-click (or Control-click) **WZRD Studio.app**.
+    3. Select **Open** from the context menu.
+    4. Click **Open** in the confirmation dialog.
+
+    **Option B — Privacy & Security settings:**
+    1. Attempt to open WZRD Studio normally. macOS will block it.
+    2. Go to **System Settings → Privacy & Security**.
+    3. Scroll to the security section and click **Open Anyway** next to the WZRD Studio entry.
+    4. Authenticate with Touch ID or your password when prompted.
+
+    <Note>
+      You only need to bypass Gatekeeper once. Subsequent launches open normally. Auth deep-link redirects (`wzrd://auth/thirdweb`) may also be blocked on the very first launch — repeating the right-click → Open step resolves this.
+    </Note>
+  </Step>
+</Steps>
+
+## Environment Setup
+
+WZRD Studio reads configuration from a `.env` file at the project root. Create this file before launching the app in development mode or building from source.
+
+```bash
+# .env
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+VITE_SUPABASE_ANON_KEY=<your-supabase-anon-key>
+VITE_THIRDWEB_CLIENT_ID=<your-thirdweb-client-id>
+```
+
+<Note>
+  Additional provider keys (e.g. for GMI Cloud, fal.ai, or Postz OAuth channels) may be required depending on which generation workflows you enable. Refer to the individual feature docs for the full list of keys each feature requires.
+</Note>
+
+| Variable | Description |
+|---|---|
+| `VITE_SUPABASE_URL` | Your Supabase project URL, found in **Project Settings → API**. |
+| `VITE_SUPABASE_ANON_KEY` | The public anon key for your Supabase project. |
+| `VITE_THIRDWEB_CLIENT_ID` | Your Thirdweb client ID, used for wallet authentication. |
+
+## Development Setup
+
+To run WZRD Studio directly from source without packaging a DMG:
+
+<Steps>
+  <Step title="Clone the repository and install dependencies">
+    ```bash
+    bun install
+    ```
+  </Step>
+  <Step title="Create the .env file">
+    Follow the [Environment Setup](#environment-setup) section above.
+  </Step>
+  <Step title="Start the web renderer only">
+    ```bash
+    bun run dev
+    ```
+    This starts the Vite dev server for the renderer. Use this when working on UI components without needing the Electron shell.
+  </Step>
+  <Step title="Start the full Electron desktop app">
+    ```bash
+    bun run desktop:dev
+    ```
+    This starts the Vite renderer **and** launches Electron with the `electron/main.js` shell, giving you hot-reload plus native desktop features including `wzrd://` deep-link handling.
+  </Step>
+</Steps>
+
+## Build the DMG from Source
+
+To produce a fresh signed-APFS DMG:
+
+```bash
+bun run desktop:dist:mac
+```
+
+This command:
+1. Runs `vite build` to compile the renderer.
+2. Calls `electron-builder --mac dir --arm64` to package the Electron app.
+3. Runs `scripts/build-apfs-dmg.mjs` to assemble the APFS DMG (using `hdiutil` directly, avoiding HFS+ compatibility issues).
+
+**Build outputs:**
+
+```text
+release/wzrdstudiofinal555-apfs.dmg
+release/mac-arm64/WZRD Studio.app
+```
+
+<Tip>
+  The `artifactName` in `package.json` is `wzrdstudiofinal555.${ext}`. The APFS script renames the final image to include the `-apfs` suffix. Do not rename the `.app` bundle inside `release/mac-arm64/` — it must be called **WZRD Studio.app** for deep-link registration to work correctly.
+</Tip>
+
+## Verification
+
+After installation or a new build, run the following checks to confirm everything is working:
+
+<CodeGroup>
+```bash Unit tests
+bun x vitest run src/lib/thirdweb/wallets.test.ts src/lib/desktop.test.ts electron/deep-links.test.js
+```
+
+```bash Desktop smoke test
+bun run desktop:test
+```
+
+```bash Lint
+bun run lint
+```
+</CodeGroup>
+
+The desktop smoke test (`bun run desktop:test`) builds the renderer and runs Playwright against the packaged Electron app using the `playwright.electron.config.ts` configuration.

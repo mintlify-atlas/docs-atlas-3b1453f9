@@ -1,0 +1,63 @@
+---
+title: "WZRD Studio: Concept to Final Video in One App"
+sidebarTitle: "Introduction"
+description: "WZRD Studio is a macOS desktop app that unifies AI storyboarding, generation, video editing, and social publishing in a single agentic workflow."
+---
+
+WZRD Studio is an AI-powered creative desktop application for macOS that collapses the entire video production pipeline — from raw idea to published content — into a single, cohesive workflow. Whether you're an independent filmmaker, a content creator, or a creative agency, WZRD Studio replaces the fragmented chain of AI tools, timelines, and export queues with one app that thinks alongside you.
+
+## What WZRD Studio Does
+
+The core creative arc in WZRD Studio follows six stages, each feeding directly into the next:
+
+1. **Concept** — Start with a prompt, a script, or a voice note. The AI interprets your intent and helps you frame the narrative.
+2. **Storyboard** — Generate shot-by-shot visual panels. Each shot becomes a node in the Studio Canvas, giving you a spatial view of your story.
+3. **Generation** — Render AI video, images, or audio from each storyboard node. Multiple AI providers (GMI Cloud, fal.ai, Groq) run in parallel across the node graph.
+4. **Director's Cut** — An automated assembly pass that sequences your generated shots, applies transitions, and proposes a rough cut ready for refinement.
+5. **Editing** — The QCut multi-track editor lets you trim, layer, and score your cut with frame-accurate precision, powered by Remotion under the hood.
+6. **Publishing** — Postz, the built-in social scheduler, connects your channels via OAuth and lets you publish or queue directly from inside the app.
+
+## Key Differentiators
+
+**Node-based Studio Canvas.** Built on React Flow, the Studio Canvas gives every generation step a first-class visual identity. Nodes can be wired together to create branching narratives, multi-variant generations, or fully automated pipelines.
+
+**QCut Multi-Track Editor.** A Remotion-powered editing surface with multi-track timelines, waveform scrubbing via Wavesurfer.js, and beat detection — all without leaving the desktop app.
+
+**MCP Agent Layer.** WZRD Studio exposes a Model Context Protocol (MCP) server at its Supabase edge so that external coding agents (Claude Code, Codex, OpenClaw, Hermes) can inspect, generate, and modify projects programmatically. A `public/.well-known/agents.json` discovery endpoint makes the server auto-discoverable.
+
+**Voice Control.** The app requests microphone access at install time (`NSMicrophoneUsageDescription`) to support real-time voice commands and voice-assisted creative workflows throughout the interface.
+
+**Thirdweb Wallet Authentication.** Instead of a username/password form, WZRD Studio authenticates users through a Thirdweb in-app wallet. The wallet token is exchanged for a Supabase session via a `wallet-auth` edge function, giving every project a verifiable on-chain identity without requiring users to manage private keys manually.
+
+## Feature Overview
+
+<CardGroup cols={2}>
+  <Card title="Studio Canvas" icon="diagram-project" href="/features/studio-canvas">
+    Node-based generation workspace built on React Flow. Wire prompts, models, and outputs into visual pipelines.
+  </Card>
+  <Card title="Storyboard" icon="film" href="/features/storyboard">
+    AI-generated shot panels that map your narrative across the Canvas before a single frame is rendered.
+  </Card>
+  <Card title="Director's Cut" icon="clapperboard" href="/features/directors-cut">
+    Automated assembly pass that sequences shots, proposes transitions, and produces a rough cut in one click.
+  </Card>
+  <Card title="Video Editor" icon="scissors" href="/features/video-editor">
+    QCut multi-track editor with Remotion-powered preview, waveform scrubbing, and beat-aware trimming.
+  </Card>
+  <Card title="Postz" icon="share-nodes" href="/features/postz">
+    Social publishing scheduler with OAuth channel connect, a calendar view, and per-channel validation.
+  </Card>
+  <Card title="MCP Server" icon="server" href="/developers/mcp-server">
+    Model Context Protocol server for agent integrations. Auto-discoverable via `agents.json`.
+  </Card>
+</CardGroup>
+
+## Desktop-First Design
+
+WZRD Studio is an Electron application built specifically for **macOS Apple Silicon** (`arm64`). It is distributed as an unsigned DMG (`wzrdstudiofinal555-apfs.dmg`) and registers the `wzrd://` custom URL scheme at install time so that OAuth callbacks, auth redirects, and social channel connections are all routed back into the desktop app rather than a browser tab.
+
+<Note>
+  Because the app is currently unsigned and unnotarized, macOS Gatekeeper will block the first launch. See the [Installation guide](/installation) for the exact steps to bypass this.
+</Note>
+
+The renderer is a React 19 / Vite 5 / TypeScript 5 single-page application running inside Electron. All AI generation, auth bridging, and social scheduling logic runs through **Supabase Edge Functions** (Deno), keeping heavy server-side work out of the desktop bundle and making the same backend accessible to both the desktop app and any web build.

@@ -1,0 +1,228 @@
+---
+title: "WZRD MCP Server: Automate Studio with AI Agents"
+sidebarTitle: "MCP Server"
+description: "WZRD Studio exposes a Model Context Protocol server that lets AI agents discover and call generation, editing, billing, and compute-graph tools."
+---
+
+WZRD Studio's MCP server is a fully compliant JSON-RPC 2.0 endpoint deployed as a Supabase Edge Function. It implements the standard MCP handshake — `initialize`, `tools/list`, and `tools/call` — so any agent harness that speaks the Model Context Protocol can discover WZRD's generation, billing, and editing tools without any custom glue code.
+
+## Server Details
+
+| Property | Value |
+|---|---|
+| **Base URL** | `https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server` |
+| **Transport** | Streamable HTTP (JSON-RPC 2.0) |
+| **Authentication** | Supabase JWT — `Authorization: Bearer <token>` |
+| **Protocol version** | `2025-03-26` |
+| **Discovery** | `GET` the base URL to retrieve server info and tool names |
+
+A `GET` request to the server URL returns the tool manifest without authentication:
+
+```bash
+curl https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server
+```
+
+```json
+{
+  "name": "wzrd-studio",
+  "version": "1.0.0",
+  "transport": "streamable-http-jsonrpc2",
+  "endpoint": "/functions/v1/mcp-server",
+  "tools": [
+    "list_models",
+    "get_credits",
+    "create_project",
+    "get_timeline",
+    "run_studio_graph",
+    "create_checkout_session",
+    "edit_timeline"
+  ]
+}
+```
+
+## Public Agent Discovery
+
+WZRD Studio publishes a well-known agent discovery document at `/.well-known/agents.json`. Any agent discovery crawler can find the MCP server, supported harnesses, and per-harness config file locations from this single endpoint.
+
+```json
+{
+  "$schema": "https://lovable.dev/schemas/well-known-agents.json",
+  "name": "WZRD Studio",
+  "description": "Agentic film/video generation studio. Build, score, generate.",
+  "homepage": "https://gmistudio.lovable.app",
+  "mcp": {
+    "url": "https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server",
+    "transport": "streamable-http",
+    "auth": "bearer"
+  },
+  "skills_index": "/agent-skills/index.json",
+  "supported_harnesses": ["claude-code", "codex", "openclaw", "hermes"],
+  "configs": {
+    "claude-code": "/.claude/CLAUDE.md",
+    "codex": "/.codex/codex.md",
+    "openclaw": "/.openclaw/manifest.json",
+    "hermes": "/.hermes/agent.yaml"
+  }
+}
+```
+
+## Available Tools
+
+The MCP server exposes seven tools mapped from the `agent-skills/index.json` manifest. Each tool corresponds to a composable WZRD workflow documented in [Agent Skills](/developers/agent-skills).
+
+<CardGroup cols={2}>
+  <Card title="list_models" icon="list">
+    Read the WZRD AI model catalog with credit cost, provider, and media type. Optionally filter by `mediaType` or `provider`.
+  </Card>
+  <Card title="start_shot_stream" icon="play">
+    Stream image or video generation for a single shot via SSE. Returns `progress` and `asset_url` events ending with `complete` or `error`.
+  </Card>
+  <Card title="render_timeline" icon="film">
+    Auto-generate every shot in a project — run `images` phase first, then `videos`. Polls progress over a project-wide SSE stream.
+  </Card>
+  <Card title="run_studio_graph" icon="diagram-project">
+    Execute a saved compute graph node-by-node for a given `project_id`. Streams `node_id`, `status`, `progress`, and `artifacts` events.
+  </Card>
+  <Card title="make_magic" icon="wand-magic-sparkles">
+    Full end-to-end pipeline: concept → project → storyline → auto-generate → Director's Cut. Returns a `final_url` when complete.
+  </Card>
+  <Card title="create_checkout_session" icon="credit-card">
+    Launch a billing checkout URL for a plan upgrade (`pro`, `enterprise`) or a credit pack. Returns a Stripe-hosted `checkout_url`.
+  </Card>
+  <Card title="edit_timeline" icon="scissors">
+    Drive the QCut editor timeline (import, add clip, split, delete, title, export) when the desktop app has `/editor` open. Requires a local MCP auth token.
+  </Card>
+</CardGroup>
+
+## Connecting an MCP Client
+
+<Steps>
+  <Step title="Obtain a Supabase JWT">
+    Authenticate through the WZRD wallet-auth flow to receive a Supabase session token. Pass it as a Bearer token on every `tools/call` request.
+  </Step>
+  <Step title="Send the initialize handshake">
+    ```typescript
+    const response = await fetch(
+      'https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${supabaseJwt}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            clientInfo: { name: 'my-agent', version: '1.0.0' },
+          },
+        }),
+      }
+    );
+
+    const { result } = await response.json();
+    // result.serverInfo  → { name: 'wzrd-studio', version: '1.0.0' }
+    // result.capabilities → { tools: {} }
+    ```
+  </Step>
+  <Step title="Discover available tools">
+    ```typescript
+    const toolsResponse = await fetch(MCP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    });
+
+    const { result } = await toolsResponse.json();
+    // result.tools → [{ name, description, inputSchema }, ...]
+    ```
+  </Step>
+  <Step title="Call a tool">
+    ```typescript
+    const callResponse = await fetch(MCP_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'list_models',
+          arguments: { mediaType: 'video' },
+        },
+      }),
+    });
+
+    const { result } = await callResponse.json();
+    // result.content → [{ type: 'text', text: '[{ "id": "gmi/ltx-fast-i2v", ... }]' }]
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Batch requests are supported. Send a JSON array of JSON-RPC 2.0 objects in one POST and receive an array of results. Notification methods (e.g. `notifications/initialized`) return HTTP 204 with no body.
+</Note>
+
+## Authentication
+
+All mutating tool calls (`run_studio_graph`, `create_checkout_session`, etc.) require a valid Supabase JWT in the `Authorization` header. Read-only tools like `list_models` accept an optional token for user-tier sorting but will succeed without one.
+
+```bash
+# Authenticated tool call
+curl -X POST https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-supabase-jwt>" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "get_credits",
+      "arguments": { "user_id": "uuid-here" }
+    }
+  }'
+```
+
+<Warning>
+  Never expose your Supabase service-role key in a client-side agent. Agents should use the user-scoped JWT obtained via the `wallet-auth` edge function, not the service role key.
+</Warning>
+
+## Per-Agent Configuration Files
+
+WZRD Studio ships ready-to-use configuration files for the four supported autonomous agent harnesses. Each file is the canonical entry point that tells the agent where to find the MCP server, which files it may edit, and what commands to run.
+
+<CardGroup cols={2}>
+  <Card title="Claude Code" icon="c">
+    `.claude/CLAUDE.md` — Project guide for Claude Code including stack overview, allowed/forbidden file edits, and MCP server URL.
+  </Card>
+  <Card title="Codex CLI" icon="terminal">
+    `.codex/codex.md` — Codex CLI guide with the same stack and server information in Codex prompt format.
+  </Card>
+  <Card title="OpenClaw" icon="claw-marks">
+    `.openclaw/manifest.json` — Structured JSON manifest consumed by the OpenClaw harness.
+  </Card>
+  <Card title="Hermes" icon="bolt">
+    `.hermes/agent.yaml` — YAML agent harness config for Hermes, including capability declarations.
+  </Card>
+</CardGroup>
+
+## Allowed and Forbidden Agent Actions
+
+The `agents.md` file at the repo root defines what autonomous agents are permitted to do when working inside the WZRD Studio codebase.
+
+**Allowed**
+- Edit anything in `src/`, `supabase/functions/`, `agent-skills/`, and `docs/`.
+- Add new Edge Functions under `supabase/functions/<name>/index.ts`.
+- Create new SQL migrations via the Lovable migration tool.
+
+**Forbidden**
+- Do **not** modify `src/integrations/supabase/types.ts` (auto-generated).
+- Do **not** modify files under `supabase/migrations/` after creation.
+- No raw SQL through `supabase.rpc('execute_sql', …)`.
+- No direct queries against `auth.users` from clients or Edge Functions.
+
+<Tip>
+  Before calling any generation tool, call `get_credits` first to verify the user has sufficient balance. Generation tools return a `402` with `{ code, required, available, top_up_url }` when credits run out — surface `top_up_url` to the user rather than failing silently.
+</Tip>

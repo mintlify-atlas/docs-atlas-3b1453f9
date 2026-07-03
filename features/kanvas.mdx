@@ -1,0 +1,328 @@
+---
+title: "Kanvas: Generative Remix and Lyrics Video Composer"
+sidebarTitle: "Kanvas"
+description: "Kanvas lets you create generative remix videos and audio-reactive lyrics animations. Generate, remix, and compose visual content driven by music and AI."
+---
+
+Kanvas is WZRD Studio's generative visual playground. It combines AI image and video generation across multiple creative studios — cinematic stills, talking-head lip-sync, image-to-image transformations, character-consistent generation — with two distinct composition workflows: **Remix**, for applying visual style transformations to existing footage, and **Lyrics**, for building audio-reactive animated lyric videos driven by your own audio and a Remotion-powered preview engine.
+
+## Routes
+
+| Path | Description |
+|---|---|
+| `/kanvas` | Main generative studio hub |
+| `/kanvas?studio=image` | Image Studio (text-to-image / image-to-image) |
+| `/kanvas?studio=video` | Video Studio (text-to-video / image-to-video) |
+| `/kanvas?studio=cinema` | Cinema Studio (cinematic stills with camera controls) |
+| `/kanvas?studio=edit` | Edit Studio (image editing with fal.ai models) |
+| `/kanvas?studio=lipsync` | LipSync Studio (talking-head and lip-sync) |
+| `/kanvas?studio=worldview` | Worldview |
+| `/kanvas?studio=character-creation` | Character Creation |
+| `/kanvas/remix` | Remix — apply AI styles to footage |
+| `/kanvas/remix/:templateId` | Remix with a pre-loaded template |
+| `/kanvas/remix/jobs/:jobId` | Track a specific remix job |
+| `/kanvas/lyrics` | Lyrics landing — browse templates |
+| `/kanvas/lyrics/new` | Lyrics wizard — upload audio and build a new video |
+| `/kanvas/lyrics/templates/:templateId` | Open a saved lyrics template |
+
+## The Kanvas Studio Hub
+
+The main Kanvas page (`/kanvas`) is a tabbed generative studio. The active studio is controlled by the `?studio=` search param, so deep-linking always lands on the right studio.
+
+### Studios at a Glance
+
+<CardGroup cols={2}>
+  <Card title="Image" icon="image">
+    Generate images from text prompts (**text-to-image**) or transform reference images (**image-to-image**). Supports multi-image references and `@mention` character injection for consistent subjects.
+  </Card>
+  <Card title="Video" icon="video">
+    Generate short videos from text (**text-to-video**), animate a reference image (**image-to-video**), or apply motion to an existing video (**reference-to-video**).
+  </Card>
+  <Card title="Cinema" icon="clapperboard">
+    Cinematic still generation with a full director's camera kit — choose camera body, lens, focal length, and aperture to influence the visual language of each output.
+  </Card>
+  <Card title="Edit" icon="pencil">
+    Powered by fal.ai models. Perform structural image edits: color grade, color key, blur, rotate, flip, aspect ratio change, sketch, and more.
+  </Card>
+  <Card title="LipSync" icon="microphone">
+    **Talking-head** mode: portrait image + audio → animated face. **Lip-sync** mode: source video + audio → mouth-synced replacement.
+  </Card>
+  <Card title="Character Creation" icon="sparkles">
+    Build reusable character blueprints that can be `@mentioned` in any prompt to inject consistent subject references across generations.
+  </Card>
+</CardGroup>
+
+### Model Selection
+
+Models are fetched per-studio at page load via `fetchKanvasModels(studio)` from the `kanvas-generate` edge function. The UI prefers fal.ai models first (`sortKanvasModelsFalFirst`), then the catalog default, then GMI Cloud models.
+
+```typescript
+// src/features/kanvas/types.ts
+interface KanvasModel {
+  id: string;
+  name: string;
+  studio: KanvasStudio;
+  mode: KanvasMode;      // 'text-to-image' | 'image-to-video' | 'talking-head' | ...
+  credits: number;       // credit cost per generation
+  requiresAssets: KanvasAssetType[];
+  controls: KanvasControlDefinition[];
+  defaults: Record<string, unknown>;
+}
+```
+
+### Credit System
+
+Each generation deducts credits based on the selected model. If your balance is insufficient, an `InsufficientCreditsError` is thrown by `submitKanvasJob` and a dialog appears showing required vs available credits with a link to the billing page.
+
+```typescript
+// src/features/kanvas/service.ts
+export class InsufficientCreditsError extends Error {
+  constructor(public payload: { required: number; available: number }) { ... }
+}
+```
+
+<Warning>
+  Credits are consumed at generation time. Queued or failed jobs do not return credits automatically. Check the **Recent Jobs** panel for job status before re-submitting.
+</Warning>
+
+### Asset Management
+
+Upload images, videos, and audio through the in-page asset selector. Assets are stored in WZRD's asset library via `uploadKanvasAsset` and persist across sessions. The last 6 assets of each type are shown as clickable thumbnails for quick selection.
+
+```typescript
+// Upload an asset
+const asset = await uploadKanvasAsset(file, { assetType: 'image' | 'video' | 'audio' });
+```
+
+### @Mention Character References
+
+Prompts support `@character-name` mentions that expand to character blueprint descriptions and reference image URLs before the request is sent to the generation model. Pin a character to inject it automatically into every prompt in the session.
+
+### Job History and Polling
+
+All submitted jobs are tracked in the **Recent Jobs** rail (per-studio). Active jobs (`queued` or `processing` status) are polled every 4 seconds via `refreshKanvasJobStatus`. After 3 consecutive poll failures the job is marked locally failed to clear the loading spinner.
+
+```typescript
+// Job status lifecycle
+type KanvasJobStatus = 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
+```
+
+### Voice Actions
+
+The Kanvas page registers two voice actions with `useRegisterVoiceActions`:
+
+- **`kanvas_set_studio`** — Switch to a studio and optionally pre-fill the prompt.
+- **`kanvas_generate`** — Trigger a generation (requires confirmation, as it spends credits).
+
+---
+
+## Remix Mode
+
+Remix (`/kanvas/remix`) applies AI visual style transformations to existing video or image sources using the footage asset library and lyric template system.
+
+<Tabs>
+  <Tab title="Browse & Select">
+    The left panel lists available footage assets from `listFootageAssets()`, filterable by:
+    - **Aspect ratio** — `all`, `9:16`, `16:9`
+    - **Category** — e.g. `bay-area-8mm` (from `listFootageCategories()`)
+    - **Tag** — free-text tag filter
+    - **Sort** — newest, oldest, shortest, longest
+  </Tab>
+  <Tab title="Timeline Slots">
+    Footage is organised into timeline slots built by `buildRemixTimelineSlots(template, assets)`. Each slot in the Remotion composition maps to a lyric block from the template. Drag-and-drop lets you assign specific clips to slots; `seededShuffle` provides randomised assignments.
+  </Tab>
+  <Tab title="Style & Preview">
+    Select from available lyric styles (`LYRIC_STYLES`) to control typography and animation. A live `@remotion/player` preview renders the full `LyricRemixComposition` at an adjustable scale (default 65%). Aspect ratio can be toggled between `9:16` and `16:9`.
+  </Tab>
+  <Tab title="Export">
+    Open the `ExportModal` to trigger a Remotion render job. Credits are deducted per generation. Completed renders are available for download from the **Jobs** view.
+  </Tab>
+</Tabs>
+
+### Remix Job Tracking
+
+`/kanvas/remix/jobs/:jobId` shows the status of a single in-progress or completed remix job, including progress percentage and the final download URL when complete.
+
+---
+
+## Lyrics Mode
+
+Lyrics mode (`/kanvas/lyrics`) is a step-by-step wizard for creating audio-reactive animated lyric videos. Upload your own audio, receive a word-level transcription, set cut markers, pick a visual template, and preview the result in a live Remotion player.
+
+### Wizard Steps
+
+<Steps>
+  <Step title="Upload Audio">
+    Drop an audio file (MP3, WAV, AAC, etc.) into the **Audio Panel** or select from previously uploaded assets. The audio is uploaded to WZRD storage via `uploadTemplateAudio` and registered via the `kanvas-lyrics-audio-register` edge function.
+
+    Waveform peaks are decoded client-side by `decodeWaveform` (using the Web Audio API) and displayed as a scrollable waveform for scrubbing.
+  </Step>
+  <Step title="Transcribe & Edit Lyrics">
+    Click **Transcribe** to send the audio to the `kanvas-lyrics-transcribe` edge function. The result is a word-level `LyricBlock[]` with start/end timestamps and confidence scores.
+
+    Edit the transcript in the **Lyrics Panel** — adjust word timing, merge or split lyric blocks, and correct any transcription errors before proceeding.
+
+    ```typescript
+    // Word-level lyric data
+    interface LyricBlock {
+      id: string;
+      startTime: number;  // seconds
+      endTime: number;
+      words: Array<{
+        id: string;
+        text: string;
+        startTime: number;
+        endTime: number;
+        confidence?: number;
+      }>;
+    }
+    ```
+  </Step>
+  <Step title="Set Cut Markers">
+    The **Markers Panel** lets you place cut markers on the waveform timeline. Markers snap to 50 ms increments and are deduplicated within a 250 ms window. These markers define where the visual footage cuts in the final composition.
+  </Step>
+  <Step title="Choose a Template">
+    Browse visual templates from `kanvas-lyrics-template`. Each template defines a Remotion composition, a set of footage slots, and default styling. Selecting a template loads it from `getTemplate(templateId)` and updates the live preview.
+  </Step>
+</Steps>
+
+### Lyrics Template Landing
+
+`/kanvas/lyrics` (without a wizard route) shows the **TemplatesLanding** component — a gallery of pre-built visual templates. Clicking a template navigates to `/kanvas/lyrics/templates/:templateId` to preview it, or to `/kanvas/lyrics/new` to start a fresh wizard with that template as the base style.
+
+### Remotion Preview and Export
+
+The Lyrics Remix composer uses `@remotion/player` for real-time preview:
+
+```tsx
+import { Player, type PlayerRef } from '@remotion/player';
+
+<Player
+  component={LyricRemixComposition}
+  inputProps={{ template, audioUrl, timelineSlots, selectedStyleId, aspectRatio }}
+  durationInFrames={totalFrames}
+  fps={30}
+  compositionWidth={width}
+  compositionHeight={height}
+/>
+```
+
+Final renders are triggered by the `ExportModal`, which calls the `kanvas-generate` edge function with the Remotion render preset. The render job is tracked in the standard Kanvas job polling loop.
+
+<Tip>
+  The Remotion player preview updates live as you adjust styles, swap footage clips, or toggle the aspect ratio — no re-submission needed. Only the final export triggers credit consumption.
+</Tip>
+
+### Lyrics Template Service
+
+```typescript
+// src/features/kanvas-lyrics/service.ts (key operations)
+createTemplate(data)         // Create a new template with audio asset
+uploadTemplateAudio(file)    // Upload audio and get a storage URL
+transcribeTemplate(id)       // Trigger transcription → word-level LyricBlocks
+updateTemplate(id, data)     // Persist lyric edits and cut markers
+finalizeTemplate(id)         // Mark as ready for rendering
+getTemplate(id)              // Fetch a saved template by ID
+```
+
+Template status lifecycle:
+```
+new → audio_ready → lyrics_processing → lyrics_ready → markers_ready → saved
+```
+
+---
+
+## Cinema Studio: Camera Controls
+
+The Cinema studio exposes a director's camera kit beyond just a text prompt:
+
+<CardGroup cols={2}>
+  <Card title="Camera" icon="camera">
+    Select from `KANVAS_CAMERAS` — film and digital camera bodies that influence grain, dynamic range, and colour science.
+  </Card>
+  <Card title="Lens" icon="circle">
+    Choose from `KANVAS_LENSES` — prime and zoom lens characters.
+  </Card>
+  <Card title="Focal Length" icon="ruler">
+    Pick from `KANVAS_FOCAL_LENGTHS` to control perspective compression.
+  </Card>
+  <Card title="Aperture" icon="aperture">
+    Select from `KANVAS_APERTURES` to dial in depth of field.
+  </Card>
+</CardGroup>
+
+These settings are assembled by `buildCinemaRequest({ prompt, cinema, modelId, settings })` before the job is submitted.
+
+---
+
+## Generation Request Types
+
+All studio submissions go through `submitKanvasJob(request)`. The request shape varies by studio:
+
+<Accordion title="Image Generation">
+  ```typescript
+  // Text-to-image
+  buildImageRequest({ modelId, prompt, settings, imageIds?, referenceAssets? })
+
+  // Image-to-image (requires at least one imageId)
+  buildImageRequest({ modelId, prompt, settings, imageIds: ['<assetId>'] })
+  ```
+</Accordion>
+
+<Accordion title="Video Generation">
+  ```typescript
+  // Text-to-video
+  buildVideoRequest({ modelId, prompt, settings, mode: 'text-to-video' })
+
+  // Image-to-video (animate a still frame)
+  buildVideoRequest({ modelId, prompt, settings, mode: 'image-to-video', imageId: '<assetId>' })
+
+  // Reference-to-video (motion from any media)
+  buildVideoRequest({ modelId, prompt, settings, mode: 'reference-to-video', referenceAssetId: '<assetId>' })
+  ```
+</Accordion>
+
+<Accordion title="LipSync">
+  ```typescript
+  // Talking-head (portrait + audio → animated face)
+  buildLipSyncRequest({ mode: 'talking-head', modelId, prompt, imageId, audioId, settings })
+
+  // Lip-sync (replace mouth movement in existing video)
+  buildLipSyncRequest({ mode: 'lip-sync', modelId, videoId, audioId, settings })
+  ```
+</Accordion>
+
+<Accordion title="Cinema">
+  ```typescript
+  buildCinemaRequest({
+    modelId, prompt, settings,
+    cinema: { camera, lens, focalLength, aperture },
+    imageIds?,           // optional reference images
+    elementIds?,         // @mention character element IDs
+    referenceBlueprintIds?,
+  })
+  ```
+</Accordion>
+
+---
+
+## Kanvas Job Lifecycle
+
+```
+submitKanvasJob(request)
+  → POST /functions/v1/kanvas-generate
+  → returns KanvasJob { id, status: 'queued' }
+
+  [polling every 4s]
+refreshKanvasJobStatus(jobId)
+  → GET /functions/v1/kanvas-job-status?id=...
+  → returns updated KanvasJob
+
+  [on status === 'completed']
+getJobPrimaryUrl(job)
+  → job.resultPayload.primaryUrl  (video or image CDN URL)
+```
+
+<Info>
+  Jobs survive page navigation. The **Recent Jobs** rail re-hydrates from `listKanvasJobs()` on page load, so in-progress generations continue updating even after a browser refresh.
+</Info>

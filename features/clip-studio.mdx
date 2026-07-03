@@ -1,0 +1,240 @@
+---
+title: "Clip Studio: FFmpeg-Powered Video Trimming and Import"
+sidebarTitle: "Clip Studio"
+description: "Clip Studio is WZRD's standalone clip editor. Trim, cut, apply captions, preview waveforms, and import YouTube videos using built-in FFmpeg tools."
+---
+
+Clip Studio is WZRD Studio's dedicated clip-cutting workspace. It takes long-form video — whether a local file or a YouTube URL — and uses AI signal fusion and native FFmpeg to identify the moments most likely to perform on short-form platforms. The result is a timeline of ranked, editable clip candidates that you can preview, refine, brand, and export as publication-ready vertical videos in one session.
+
+## Route
+
+`/clip-studio`
+
+## How It Works
+
+<Steps>
+  <Step title="Import your source">
+    Open a local video with the native desktop file picker, drop a file in-browser, or paste a YouTube URL to download a 1080p MP4 directly through the yt-dlp wrapper.
+  </Step>
+  <Step title="Generate clip candidates">
+    Choose a mode: **Viral Clip Version** (AI signal fusion), **Timestamp Clips** (paste start–end ranges), or **Auto Clip** (continuous 60-second segments, no AI).
+  </Step>
+  <Step title="Review the timeline">
+    Inspect ranked candidates on the interactive timeline. Scrub, adjust in/out points with drag handles, include or exclude clips, and edit caption titles directly.
+  </Step>
+  <Step title="Export">
+    Render included clips as 9:16 vertical MP4s (with optional brand-logo intro and watermark) to a chosen folder. Each export produces a thumbnail alongside the clip.
+  </Step>
+</Steps>
+
+## Clip Analysis Modes
+
+<CardGroup cols={3}>
+  <Card title="Viral Clip Version" icon="wand-magic-sparkles">
+    Fuses YouTube viewmap replay peaks, transcript windows, representative frame thumbnails, screenshot heatmaps, manual timestamps, and free-text notes into ranked clip candidates via the `analyzeVideoWithAiProvider` GMI service.
+  </Card>
+  <Card title="Timestamp Clips" icon="scissors">
+    Parses pasted `start–end` ranges (e.g. `0:32–1:15`) into timeline clips without any cloud analysis. Useful when you already know the cut points.
+  </Card>
+  <Card title="Auto Clip" icon="rotate">
+    Splits the imported source into continuous segments up to 60 seconds each. No AI, no network calls — runs entirely from local metadata.
+  </Card>
+</CardGroup>
+
+## Electron IPC Channels
+
+All media operations are powered by Electron IPC handlers namespaced `wzrd:clip-studio:*`. These are available only in WZRD Studio Desktop.
+
+<Accordion title="probe — FFprobe metadata">
+  Runs `ffprobe` on the local file to extract duration, streams, dimensions, FPS, codec, bitrate, and format name.
+
+  ```typescript
+  desktop.getVideoMetadata({
+    filePath: '/path/to/video.mp4',
+    ffmpegPath?: '/opt/homebrew/bin/ffmpeg',
+  });
+  // → { durationSeconds, width, height, fps, codec, bitrate, formatName }
+  ```
+
+  Internally calls `buildFfprobeMetadataArgs` and `parseFfprobeMetadata` from `electron/clip-studio-ffmpeg.js`.
+</Accordion>
+
+<Accordion title="cut-clip — trim to in/out points">
+  Performs a fast stream-copy trim (`-c copy`) between `startSeconds` and `startSeconds + durationSeconds`. No re-encode, so it completes near-instantly.
+
+  ```javascript
+  // electron/clip-studio-ffmpeg.js
+  export function buildCutClipArgs(params) {
+    return [
+      '-y', '-ss', formatSecondsForFfmpeg(params.startSeconds),
+      '-i', params.sourcePath,
+      '-t', formatSecondsForFfmpeg(params.durationSeconds),
+      '-map', '0', '-c', 'copy', '-movflags', '+faststart',
+      params.outputPath,
+    ];
+  }
+  ```
+</Accordion>
+
+<Accordion title="thumbnail — extract frame">
+  Seeks to `atSeconds` and captures a single JPEG frame at quality 2 (`-q:v 2`).
+
+  ```javascript
+  export function buildThumbnailArgs(params) {
+    return [
+      '-y', '-ss', formatSecondsForFfmpeg(params.atSeconds),
+      '-i', params.sourcePath,
+      '-frames:v', '1', '-q:v', '2',
+      params.outputPath,
+    ];
+  }
+  ```
+</Accordion>
+
+<Accordion title="export-vertical-clip — 9:16 render">
+  Re-encodes the trimmed segment to a 1080×1920 vertical format using a scale-and-crop filter, then optionally composites a brand-logo intro and bottom watermark.
+
+  ```javascript
+  // Core vertical filter
+  export const VERTICAL_9_16_FILTER =
+    'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920';
+  ```
+
+  When a `logoPath` is supplied, the filter graph becomes:
+
+  ```
+  [0:v] → scale/crop → setsar=1 [base]
+  [1:v] logo → split → intro (fade in/out, centred, up to logoIntroSeconds)
+                     → watermark (50% opacity, bottom-centre, after intro)
+  [base + intro + watermark] → [v]
+  ```
+
+  Encode settings: `libx264`, `veryfast`, CRF 18, AAC 192k, `+faststart`.
+</Accordion>
+
+## YouTube Integration
+
+Clip Studio includes a full yt-dlp wrapper for importing YouTube videos without leaving the app.
+
+### URL Validation
+
+```typescript
+// electron/clip-studio-youtube.js
+export function isSupportedYoutubeUrl(rawUrl: string): boolean {
+  // Accepts youtube.com and youtu.be hostnames only
+}
+```
+
+### Download Pipeline
+
+<Steps>
+  <Step title="Fetch video info">
+    `buildYoutubeInfoArgs(url)` calls `yt-dlp --dump-single-json` to read metadata including the "most replayed" viewmap heatmap (if available).
+  </Step>
+  <Step title="Download 1080p MP4">
+    `buildYoutubeDownloadArgs({ url, outputTemplate, ffmpegPath })` uses the format selector `bv*[height=1080][ext=mp4]+ba[ext=m4a]/b[height=1080][ext=mp4]` and remuxes to MP4 via FFmpeg.
+  </Step>
+  <Step title="Extract subtitles">
+    `buildYoutubeSubtitleArgs({ url, outputTemplate })` downloads auto-generated English VTT captions using `--write-auto-subs` and parses them into transcript segments for signal fusion.
+  </Step>
+  <Step title="Parse progress">
+    `parseYoutubeDownloadProgress(text)` converts yt-dlp's `[download] NN%` lines into structured `{ stage, percent, message }` objects, reporting stages `downloading` (0–94%), `processing` (95%), and `starting` (0%).
+  </Step>
+</Steps>
+
+### Viewmap / Most-Replayed Data
+
+When yt-dlp metadata includes YouTube's "most replayed" heatmap, `parseYoutubeViewmap(payload)` normalises the raw `heatmap` / `most_replayed` arrays into scored, time-stamped replay peaks. These peaks appear as **orange markers** on the Clip Studio timeline and are fed directly into the AI signal-fusion analysis as high-confidence candidate seeds.
+
+```typescript
+type ViewmapPoint = {
+  startSeconds: number;
+  endSeconds: number;
+  value: number;
+  normalizedScore: number; // 0–100
+};
+```
+
+## Waveform Display
+
+Waveform peaks are extracted via `wzrd:media:extract-waveform-peaks` (using `buildExtractWaveformPcmArgs` — a PCM pipe from `ffmpeg -f f32le` at 8 kHz). The peaks power the scrubber visualisation below the video preview so you can precisely locate cuts by audio shape.
+
+## Interactive Timeline
+
+The timeline component (`ClipTimeline`) renders clip candidates as coloured blocks with draggable in/out handles:
+
+<CardGroup cols={2}>
+  <Card title="Zoom presets" icon="magnifying-glass">
+    **Fit** — whole source fits viewport. **Min** — minute-level overview. **Sec** — second-level cuts. **Frame** — frame-precise editing. Keyboard `+`/`-` for free zoom; `F` to fit selected clip; `⇧F` for whole-source fit.
+  </Card>
+  <Card title="Snap behaviour" icon="magnet">
+    Clip handles snap to frame boundaries and to adjacent clip edges. Hold **Shift**, **Alt**, or **⌘** while dragging to disable snapping.
+  </Card>
+  <Card title="Candidate sources" icon="tags">
+    Clips are colour-coded by origin: **orange** = AI (GMI), **emerald** = timestamp, **cyan** = auto, **zinc** = manual.
+  </Card>
+  <Card title="Signal badges" icon="chart-line">
+    Each AI candidate shows evidence badges: `viewmap_peak`, `manual_timestamp`, `transcript_hook`, `visual_frame`, `screenshot_heatmap`.
+  </Card>
+</CardGroup>
+
+## Signal Fusion Analysis
+
+When you click **Analyze**, Clip Studio:
+
+1. Captures representative frames at viewmap-peak timestamps (desktop: via `extractRepresentativeFrames` IPC; browser: via canvas seek + `toDataURL`).
+2. Builds an `AnalysisContextPackage` combining viewmap data, transcript windows, frame thumbnails, screenshot heatmaps, manual timestamps, and free-text notes.
+3. Sends the package to `analyzeVideoWithAiProvider` (GMI edge function) which returns ranked `ClipCandidate[]` with `score`, `hook`, `reason`, `archetype`, `platformFit`, and `evidenceSummary`.
+4. Deduplicates overlapping candidates with `enforceUniqueClipCandidates`.
+
+## Caption / Title Overlays
+
+Clip Studio builds unique, non-colliding TikTok-style caption titles for exported clips using:
+
+- `buildCaptionTitleTargets(candidates)` — maps each included clip to a title target.
+- `buildUniqueClipCaptionTitles({ clips, source, existingLibrary })` — ensures no two exports share the same file name.
+- `buildExistingCaptionCollisionInputs(library)` — loads previously exported clip names to prevent duplicate file names across sessions.
+
+## Export Readiness Checklist
+
+Before exporting, Clip Studio evaluates four readiness conditions:
+
+| Condition | Signal |
+|---|---|
+| Source imported with local path | 🟢 Green dot |
+| FFmpeg and FFprobe available | 🟢 Green dot |
+| Export folder chosen | 🟢 Green dot |
+| At least one clip marked "Include" | 🟢 Green dot |
+
+<Warning>
+  Export requires WZRD Studio Desktop. FFmpeg must be on the system `PATH` or configured via the **ffmpeg path override** setting (`/opt/homebrew/bin/ffmpeg` for Homebrew installs). yt-dlp must similarly be available for YouTube downloads.
+</Warning>
+
+## Settings
+
+<Accordion title="Advanced settings panel">
+
+| Setting | Default | Notes |
+|---|---|---|
+| Viral Finder Prompt | Built-in | Customize the AI analysis instruction |
+| Timeout | 60s | Max analysis wait time |
+| Default mode | Viral | `viral` or `auto` |
+| Platform preset | Shorts | `shorts`, `tiktok`, `reels`, `multi` |
+| ffmpeg path override | `ffmpeg` | Full path to a custom FFmpeg binary |
+| yt-dlp path override | `yt-dlp` | Full path to a custom yt-dlp binary |
+| Captions on by default | Off | Auto-attach transcript excerpt to exports |
+| Vertical 9:16 export | On | Uses scale/crop; toggling off produces an untransformed cut |
+| Brand logo | None | PNG/SVG logo for intro fade + bottom watermark |
+| Logo intro duration | 3s | How long the centred intro logo stays on screen |
+| Logo watermark opacity | 50% | Opacity of the persistent bottom watermark |
+
+Settings are persisted locally via `saveClipStudioSettings` and survive app restarts.
+</Accordion>
+
+## Export Library
+
+Successfully exported clips are saved to a local library (`listExportedClips` / `saveExportedClip` / `deleteExportedClip`) so you can track what has already been cut from a given source and avoid duplicate file names on re-export.
+
+<Tip>
+  After export, use the **Send to Editor** button on any library entry to push the clip directly into the WZRD Video Editor timeline as a project asset.
+</Tip>

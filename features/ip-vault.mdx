@@ -1,0 +1,250 @@
+---
+title: "IP Vault: Register Creative Assets On-Chain"
+sidebarTitle: "IP Vault"
+description: "IP Vault lets you register WZRD project assets as intellectual property on Story Protocol, creating an on-chain ownership record for your AI-generated content."
+---
+
+IP Vault is WZRD Studio's on-chain rights registry. Every image, video, audio clip, or character blueprint you finalize inside the Studio can be promoted to a verifiable intellectual property record on [Story Protocol](https://www.storyprotocol.xyz/) — a blockchain layer purpose-built for creative IP. Registration mints an NFT that permanently anchors your content to a wallet address, enables programmable licensing, and creates a transparent royalty trail for derivative works.
+
+## Route
+
+`/ip-vault`
+
+## How It Works
+
+IP Vault wraps the `@story-protocol/core-sdk` behind a clean service layer. The `ipVaultService` handles all Supabase interactions, while the `registerVaultItemOnStory` helper (in `src/lib/story/registration`) calls the Story Protocol SDK with a connected wallet. Metadata is pinned to IPFS via the `story-ipfs-metadata` Supabase edge function before any on-chain transaction is submitted.
+
+```
+WZRD Asset  →  IP Vault Item (draft)  →  IPFS metadata pin
+                                              ↓
+                                    Story Protocol SDK
+                                              ↓
+                                   On-chain IP record (ip_id)
+                                              ↓
+                             ip_vault_items row updated (registered)
+```
+
+## Registration Workflow
+
+<Steps>
+  <Step title="Add an asset to IP Vault">
+    Any finalized project asset, character blueprint, or generation output can be added to the vault. Call `ipVaultService.finalizeSource()` with a `FinalizeIPVaultSourceInput`:
+
+    ```typescript
+    await ipVaultService.finalizeSource({
+      sourceType: "project_asset",  // or "final_project_asset" | "character_blueprint" | "generation_output"
+      sourceId: "<asset-uuid>",
+      title: "My Short Film Poster",
+      description: "Key art for Episode 1",
+      assetKind: "image",
+    });
+    ```
+
+    The service resolves the source record, copies its media URL, thumbnail, and metadata into a new `ip_vault_items` row with `registration_status: "draft"`, and builds an initial **proof packet** capturing provenance.
+  </Step>
+  <Step title="Connect your wallet">
+    IP Vault uses the same Thirdweb wallet used for WZRD authentication. Before registering, ensure:
+
+    - A wallet is connected (`storyWallet.isConnected === true`)
+    - The wallet is switched to the **Story Aeneid** test network (`storyWallet.isOnAeneid === true`)
+
+    <Warning>
+      Registering IP on Story Protocol submits an on-chain transaction. Your wallet must hold enough WIP (Wrapped IP) tokens on the Aeneid network to cover gas fees. Transactions that fail due to insufficient funds are caught and the vault item is marked `registration_status: "failed"` with the error message stored in `proof_packet.registrationError`.
+    </Warning>
+  </Step>
+  <Step title="Pin metadata to IPFS">
+    Before the on-chain call, IP Vault pins two metadata files to IPFS using the `story-ipfs-metadata` edge function:
+
+    - **IP metadata** (`ip_metadata_uri`, `ip_metadata_hash`) — title, description, creator, content hash, and asset URL in Story Protocol's IP metadata standard
+    - **NFT metadata** (`nft_metadata_uri`, `nft_metadata_hash`) — ERC-721-compatible token metadata
+
+    This step happens automatically when you click **Register** if the URIs are not yet present on the vault item. You can also trigger it manually with **Prepare metadata**.
+  </Step>
+  <Step title="Register on-chain">
+    Click **Register** in the IP Inspector panel. IP Vault:
+
+    1. Pins metadata (if not already done)
+    2. Marks the item `registering`
+    3. Calls `registerVaultItemOnStory(client, item, { walletAddress })` using the Story Protocol SDK
+    4. Calls `ipVaultService.persistRegistration()` with the returned `ipId`, `tokenId`, `txHash`, `nftContract`, and `royaltyVaultAddress`
+
+    On success the item transitions to `registration_status: "registered"` and the Story Explorer URL is stored for direct linking.
+  </Step>
+  <Step title="View your IP record">
+    Registered items display their `ip_id`, `token_id`, `nft_contract`, `tx_hash`, and a **Story Explorer** link in the IP Inspector panel. The dashboard summary shows total finalized vs. registered counts at a glance.
+  </Step>
+</Steps>
+
+## Registration Statuses
+
+| Status | Meaning |
+|---|---|
+| `draft` | Added to the vault; metadata not yet pinned |
+| `metadata_ready` | IPFS metadata pinned; ready to register on-chain |
+| `registering` | On-chain transaction in flight |
+| `registered` | Successfully registered — `ip_id` and `tx_hash` are set |
+| `failed` | Registration failed; error stored in `proof_packet.registrationError` |
+
+## Licensing Profiles
+
+When registering, choose a license profile that defines how others may use your IP:
+
+<CardGroup cols={2}>
+  <Card title="None" icon="lock">
+    All rights reserved. No downstream licensing terms are attached.
+  </Card>
+  <Card title="Non-Commercial Social Remix" icon="share-nodes">
+    Allows free remixing for non-commercial, social purposes. No revenue share required.
+  </Card>
+  <Card title="Commercial Use" icon="briefcase">
+    Allows commercial use of the IP. A minting fee and revenue share can be configured.
+  </Card>
+  <Card title="Commercial Remix" icon="code-branch">
+    Allows commercial derivative works. Configurable `commercial_rev_share` (%) and `minting_fee_wip`.
+  </Card>
+  <Card title="Creative Commons Attribution" icon="creative-commons">
+    Free use with attribution required. Maps to the CC BY license framework.
+  </Card>
+</CardGroup>
+
+## Derivative Works
+
+IP Vault supports registering an asset as a **derivative** of one or more existing registered IPs on Story Protocol:
+
+<Tabs>
+  <Tab title="Root IP">
+    The asset is an original work — no parent IPs. `relationship_type: "root"`.
+  </Tab>
+  <Tab title="Derivative">
+    The asset builds upon one or more registered parent IPs. Set `relationship_type` to `"derivative"`, `"remix"`, or `"adaptation"` and provide `parent_ip_ids` (the on-chain `ip_id` values of the parent works).
+
+    ```typescript
+    await ipVaultService.updateRights(itemId, {
+      licenseProfile: "commercial_remix",
+      relationshipType: "derivative",
+      parentIpIds: ["0xabc..."],
+      commercialRevShare: 10,   // 10% revenue share to parent IP holders
+      mintingFeeWip: 1,         // 1 WIP minting fee
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Revenue Claims
+
+Once an IP is registered and has accumulated royalties in its Story Protocol royalty vault, you can claim them directly from IP Vault:
+
+1. Select a registered item in the gallery
+2. Click **Claim revenue** in the IP Inspector
+3. IP Vault calls `claimVaultRevenueOnStory(client, item, walletAddress)` via the Story Protocol SDK
+4. The transaction hash and claim timestamp are persisted to `last_claim_tx_hash` and `last_claimed_at`
+
+<Note>
+  Revenue claims require the royalty vault to have a positive balance. The claim transaction pays gas from your connected wallet. Claimed tokens are sent to the wallet address registered with the IP.
+</Note>
+
+## IP Vault Gallery
+
+The gallery panel on the left of the IP Vault page provides:
+
+- **Search** — filters by `title`, `description`, and `asset_kind`
+- **Status filter** — `all`, `draft`, `metadata_ready`, `registering`, `registered`, `failed`
+- Thumbnail grid with registration status badges
+- Click any item to load it into the IP Inspector
+
+The summary bar above the gallery shows total vault items and registered count at a glance.
+
+## `ipVaultService` API
+
+The service layer (`src/services/ipVaultService.ts`) handles all database interactions:
+
+<Accordion title="list(filters?)">
+  Returns all `ip_vault_items` for the current user, newest first. Optional `projectId`, `status`, and `search` filters.
+
+  ```typescript
+  const items = await ipVaultService.list({ status: "registered" });
+  ```
+</Accordion>
+
+<Accordion title="finalizeSource(input)">
+  Resolves the source record (project asset, final asset, blueprint, or generation output), copies its metadata, and creates a `draft` vault item. Idempotent — returns the existing item if the source has already been vaulted.
+
+  ```typescript
+  const item = await ipVaultService.finalizeSource({
+    sourceType: "character_blueprint",
+    sourceId: "<blueprint-uuid>",
+    title: "Agent Zero — Character Design",
+  });
+  ```
+</Accordion>
+
+<Accordion title="updateRights(itemId, input)">
+  Updates licensing and derivative relationship fields without touching registration state.
+
+  ```typescript
+  await ipVaultService.updateRights(itemId, {
+    licenseProfile: "commercial_remix",
+    relationshipType: "derivative",
+    parentIpIds: ["0xparent..."],
+    commercialRevShare: 15,
+  });
+  ```
+</Accordion>
+
+<Accordion title="pinStoryMetadata(itemId)">
+  Calls the `story-ipfs-metadata` edge function to upload IP and NFT metadata to IPFS and writes the resulting URIs and hashes back to the vault item row. Returns a `StoryMetadataPinResult` containing the updated `IPVaultItem`.
+</Accordion>
+
+<Accordion title="persistRegistration(itemId, result)">
+  Writes the on-chain registration result (ip_id, token_id, tx_hash, nft_contract, royalty_vault_address, license_terms_ids) to the vault item and updates `registration_status` to `"registered"`. Also builds a detailed `proof_packet.story` snapshot.
+</Accordion>
+
+<Accordion title="markRegistrationFailed(itemId, message)">
+  Sets `registration_status: "failed"` and records the error message in `proof_packet.registrationError`. Called automatically if any step of the registration flow throws.
+</Accordion>
+
+## Proof Packet
+
+Every vault item carries a `proof_packet` JSON object that accumulates provenance data across the item's lifecycle:
+
+```json
+{
+  "finalizedAt": "2025-01-15T12:00:00Z",
+  "source": {
+    "type": "project_asset",
+    "id": "<source-uuid>",
+    "projectId": "<project-uuid>"
+  },
+  "media": {
+    "url": "https://cdn.example.com/asset.mp4",
+    "thumbnailUrl": "https://cdn.example.com/thumb.jpg",
+    "type": "video"
+  },
+  "story": {
+    "network": "aeneid",
+    "status": "registered",
+    "ipId": "0xabc123...",
+    "tokenId": "42",
+    "nftContract": "0xdef456...",
+    "txHash": "0x789...",
+    "explorerUrl": "https://explorer.story.foundation/ipa/0xabc123...",
+    "royaltyVaultAddress": "0xvault...",
+    "registeredAt": "2025-01-15T12:05:00Z"
+  }
+}
+```
+
+## Source Types
+
+IP Vault can vault assets from four source types:
+
+| Source Type | Description |
+|---|---|
+| `project_asset` | Any asset in the `project_assets` table (uploads, renders, Sourcify imports) |
+| `final_project_asset` | Exported final deliverables from `final_project_assets` |
+| `character_blueprint` | Named characters, environments, or props from the Blueprint system |
+| `generation_output` | AI generation outputs from `generation_outputs` |
+
+<Tip>
+  Character blueprints are a particularly valuable source type for IP registration — they encode the full visual specification of a character (prompt fragment, traits, face details, reference images) in a single registerable record, establishing provenance for derivative AI generations that use that character.
+</Tip>

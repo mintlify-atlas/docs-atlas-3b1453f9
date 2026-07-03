@@ -1,0 +1,172 @@
+---
+title: "Authenticate with WZRD Studio via Thirdweb"
+sidebarTitle: "Authentication"
+description: "WZRD Studio uses Thirdweb in-app wallet authentication bridged into Supabase sessions. Learn how desktop and web auth flows differ."
+---
+
+WZRD Studio does not use traditional username and password authentication. Instead, it authenticates users through a **Thirdweb in-app wallet** and then exchanges that wallet token for a **Supabase session** via a dedicated edge function. This design gives every project a verifiable on-chain identity while keeping the sign-in experience as simple as social login.
+
+## How the Auth Flow Works
+
+The complete authentication sequence has three steps:
+
+1. **Wallet connect** — The user selects an auth method (Google, Apple, Discord, email, passkey, or phone) in the Thirdweb `ConnectEmbed` UI. Thirdweb handles the OAuth or credential flow and returns a connected in-app wallet with a signed token.
+2. **Token exchange** — The app calls `POST /functions/v1/wallet-auth` (the Supabase `wallet-auth` edge function), passing the wallet address, a signed message, and its signature. The edge function verifies the signature and returns a Supabase `access_token` and `refresh_token`.
+3. **Session bootstrap** — The app calls `supabase.auth.setSession({ access_token, refresh_token })`, which establishes a full Supabase session. From this point on, all Supabase queries are authenticated as the wallet-owning user.
+
+```
+User
+ │
+ ▼
+Thirdweb ConnectEmbed (inApp wallet)
+ │  social / email / passkey OAuth
+ ▼
+Thirdweb wallet connected → wallet.signMessage(…)
+ │
+ ▼
+POST /functions/v1/wallet-auth
+ │  { walletAddress, message, signature, timestamp }
+ ▼
+wallet-auth edge function verifies signature
+ │  returns { session: { access_token, refresh_token } }
+ ▼
+supabase.auth.setSession(…) → Supabase session active
+```
+
+## Desktop vs. Web Auth
+
+The authentication behavior differs between the desktop (Electron) and web builds. The key difference is how Thirdweb redirects the user back to the app after the OAuth provider completes.
+
+### Desktop Auth
+
+On desktop, Thirdweb's in-app wallet is configured to open social OAuth flows in a **separate browser window** and redirect back to the app via the `wzrd://` custom URL scheme.
+
+`createThirdwebWallets({ isDesktop: true })` returns exactly two wallet options:
+
+```ts
+// src/lib/thirdweb/wallets.ts
+createThirdwebWallets({ isDesktop: true })
+// → ['inApp', 'walletConnect']
+```
+
+The in-app wallet on desktop is created with `mode: 'window'` and a `redirectUrl` pointing at the `wzrd://` deep-link handler:
+
+```ts
+inAppWallet({
+  auth: {
+    options: ['google', 'apple', 'discord', 'email', 'passkey', 'phone'],
+    mode: 'window',
+    redirectUrl: 'wzrd://auth/thirdweb',
+  },
+})
+```
+
+When `createThirdwebWallets` is called with `desktopAuthReturnUrl`:
+
+```ts
+createThirdwebWallets({
+  isDesktop: true,
+  desktopAuthReturnUrl: 'wzrd://auth/thirdweb',
+})
+```
+
+The desktop in-app wallet will always use `mode: 'window'` with that return URL.
+
+#### Deep-link callback
+
+After the OAuth provider redirects to `wzrd://auth/thirdweb`, Electron's main process intercepts the URL and forwards it to the renderer via `resolveDeepLinkToAppUrl`. The deep-link handler in `electron/deep-links.js` validates and sanitizes the callback parameters (allowing `authResult`, `authCookie`, `walletId`, `authProvider`, and an optional `next` path) before routing to the `/login` page with those parameters attached.
+
+<Note>
+  Auth-sensitive parameters (`authResult`, `authCookie`, `walletId`, `authProvider`) are **redacted** in log output. Diagnostic logs are written to:
+  ```
+  ~/Library/Logs/WZRD Studio/desktop.log
+  ```
+  Check this file if auth redirects are silently failing.
+</Note>
+
+### Web Auth
+
+On the web build, `createThirdwebWallets({ isDesktop: false })` returns the full wallet list including browser extension wallets:
+
+```ts
+createThirdwebWallets({ isDesktop: false })
+// → ['inApp', 'io.metamask', 'com.coinbase.wallet', 'me.rainbow', 'walletConnect']
+```
+
+The in-app wallet on the web uses Thirdweb's **default popup flow** — no `mode: 'window'` and no `wzrd://` redirect URL are set. The OAuth callback is handled entirely within the browser.
+
+## The `wallet-auth` Edge Function
+
+The `wallet-auth` Supabase edge function is the bridge between Thirdweb and Supabase. It lives at:
+
+```
+POST https://<project-ref>.supabase.co/functions/v1/wallet-auth
+```
+
+**Request body:**
+
+```json
+{
+  "walletAddress": "0x…",
+  "message": "Sign this message to authenticate…\n\nWallet: 0x…\nTimestamp: 1234567890",
+  "signature": "0x…",
+  "timestamp": 1234567890
+}
+```
+
+**Success response:**
+
+```json
+{
+  "session": {
+    "access_token": "<supabase-jwt>",
+    "refresh_token": "<refresh-token>"
+  }
+}
+```
+
+The edge function verifies that the signature matches the wallet address and that the timestamp is within an acceptable window, then creates or retrieves the corresponding Supabase user and issues a session.
+
+## Required Environment Variables
+
+| Variable | Where to find it | Purpose |
+|---|---|---|
+| `VITE_THIRDWEB_CLIENT_ID` | [thirdweb.com/dashboard](https://thirdweb.com/dashboard) → Project → Client ID | Initializes the Thirdweb client and wallet UI |
+| `VITE_SUPABASE_URL` | Supabase → Project Settings → API → Project URL | Points the app at your Supabase project |
+| `VITE_SUPABASE_ANON_KEY` | Supabase → Project Settings → API → anon/public key | Authenticates the frontend Supabase client |
+
+<Warning>
+  Never expose your Supabase **service role key** in the frontend. The `wallet-auth` edge function uses the service role key server-side (via a Supabase secret) to create and manage users — the frontend only ever uses the anon key.
+</Warning>
+
+## Gatekeeper and Auth Redirects
+
+Because WZRD Studio is currently unsigned, macOS may block the `wzrd://` URL scheme from being registered on first launch. If the OAuth flow completes in the browser but the app does not receive the callback:
+
+1. Quit WZRD Studio.
+2. Right-click **WZRD Studio.app** in Applications → **Open** → confirm in the dialog.
+3. Retry the sign-in flow from inside the app.
+
+After the first successful right-click open, macOS remembers the exemption and subsequent `wzrd://` redirects are handled automatically.
+
+<Tip>
+  If you're debugging desktop auth, open `~/Library/Logs/WZRD Studio/desktop.log` in Console.app and filter by `deep-link` or `auth`. All parameters are present but sensitive values are replaced with `[redacted]`, so you can safely share these logs when filing a bug report.
+</Tip>
+
+## Auto-Authentication
+
+Once a Thirdweb wallet is connected, `AuthProvider` automatically attempts to exchange it for a Supabase session without requiring the user to click a second "sign in" button. If the wallet-auth call fails (e.g. due to a rejected signature), the provider records the wallet address as failed and does not retry — the user must manually retry from the login screen to avoid an infinite loop.
+
+```tsx
+// src/providers/AuthProvider.tsx (simplified)
+useEffect(() => {
+  if (!thirdwebAccount || user || loading || isWalletAuthenticating) return;
+  if (failedWalletRef.current === thirdwebAccount.address.toLowerCase()) return;
+
+  authenticateWallet().then(success => {
+    if (!success) {
+      failedWalletRef.current = thirdwebAccount.address.toLowerCase();
+    }
+  });
+}, [thirdwebAccount, user, loading, isWalletAuthenticating]);
+```

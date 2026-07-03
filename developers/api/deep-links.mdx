@@ -1,0 +1,261 @@
+---
+title: "WZRD Deep Links: Desktop URL Scheme Reference"
+sidebarTitle: "Deep Links"
+description: "WZRD Studio registers the wzrd:// URL scheme on macOS. Use deep links for auth callbacks, OAuth returns, and custom routing into the desktop app."
+---
+
+WZRD Studio registers the `wzrd://` custom URL scheme on macOS via Electron's `app.setAsDefaultProtocolClient('wzrd')`. When any program — a browser, another app, or a shell command — opens a `wzrd://` URL, macOS hands it to WZRD Studio, which maps the URL to an in-app route and navigates to it. This mechanism drives two critical flows: the Thirdweb wallet authentication callback and the Postz social OAuth return. All deep-link parsing, sanitization, and route resolution happens in `electron/deep-links.js`.
+
+<Note>
+  The `wzrd://` protocol is also used internally as the custom Electron protocol for loading the app's renderer (`wzrd://app/...`) and serving Clipper media files (`wzrd://media/...`). These internal uses are separate from the external deep-link scheme documented here.
+</Note>
+
+---
+
+## Protocol Registration
+
+The scheme is registered in `electron/main.js`:
+
+```javascript
+// electron/main.js
+app.setAsDefaultProtocolClient('wzrd');
+```
+
+The renderer protocol (`wzrd://app/`) is registered separately via `protocol.registerSchemesAsPrivileged` in `electron/protocol.js`, marking it as `standard`, `secure`, and `supportFetchAPI`-enabled so the renderer can make `fetch()` calls to `wzrd://app/` paths.
+
+```javascript
+// electron/protocol.js
+export const WZRD_PROTOCOL = 'wzrd';
+export const WZRD_APP_HOST  = 'app';
+export const WZRD_MEDIA_HOST = 'media';
+export const WZRD_APP_ORIGIN = `wzrd://app`;
+```
+
+---
+
+## Helper Functions
+
+### `createDeepLink(pathname)`
+
+Constructs a `wzrd://` URL from a path string. Leading and trailing slashes are normalized away.
+
+```javascript
+import { createDeepLink } from './electron/deep-links.js';
+
+createDeepLink('auth/thirdweb'); // → 'wzrd://auth/thirdweb'
+createDeepLink('/postz/connected'); // → 'wzrd://postz/connected'
+```
+
+### `normalizeDeepLinkPath(pathname)`
+
+Strips leading and trailing slashes from a path string. Used internally when constructing the canonical route key from `hostname + pathname`.
+
+```javascript
+normalizeDeepLinkPath('/auth/thirdweb/'); // → 'auth/thirdweb'
+```
+
+### `resolveDeepLinkToAppUrlWithDiagnostics(rawUrl)`
+
+The main resolution function. Parses the raw `wzrd://` URL, identifies the route, sanitizes all parameters, and returns the corresponding in-app URL (`wzrd://app/...`) plus a diagnostics object.
+
+```javascript
+const { appUrl, diagnostics } = resolveDeepLinkToAppUrlWithDiagnostics(rawUrl);
+// appUrl  → e.g. 'wzrd://app/login?authResult=...'
+// diagnostics → { rawRoute, rawUrl, resolvedRoute, paramNames, droppedParamNames }
+```
+
+<ResponseField name="appUrl" type="string">
+  The resolved `wzrd://app/` URL the app should navigate to.
+</ResponseField>
+<ResponseField name="diagnostics.rawRoute" type="string">
+  The normalized route string from the deep link (e.g., `auth/thirdweb`).
+</ResponseField>
+<ResponseField name="diagnostics.rawUrl" type="string">
+  A log-safe version of the raw URL with auth param values replaced by `[redacted]`.
+</ResponseField>
+<ResponseField name="diagnostics.resolvedRoute" type="string">
+  A log-safe version of the resolved app URL.
+</ResponseField>
+<ResponseField name="diagnostics.paramNames" type="string[]">
+  All query parameter names present in the deep link.
+</ResponseField>
+<ResponseField name="diagnostics.droppedParamNames" type="string[]">
+  Parameter names that were removed during sanitization (unknown, malformed, or disallowed).
+</ResponseField>
+
+### `buildUrlForLog(rawUrl)`
+
+Returns a safe string representation of a URL for logging. All auth parameter **values** are replaced with `[redacted]`; other parameters are replaced with `[present]`.
+
+```javascript
+buildUrlForLog('wzrd://auth/thirdweb?authResult=abc123&walletId=0xdef');
+// → 'wzrd://auth/thirdweb?authResult=[redacted]&walletId=[redacted]'
+```
+
+Diagnostic output is written to `~/Library/Logs/WZRD Studio/desktop.log`.
+
+---
+
+## Built-in Routes
+
+### `wzrd://auth/thirdweb` — Thirdweb Auth Callback
+
+Handles the return from Thirdweb's auth flow. The deep link is opened by the system browser after the user completes wallet authentication on a web page. WZRD Studio resolves it to `/login` with the auth parameters forwarded.
+
+**Resolved app URL:** `wzrd://app/login?<forwarded-params>`
+
+#### Parameter Reference
+
+| Parameter | Allowlisted | Sanitization | Description |
+|---|---|---|---|
+| `authResult` | ✅ | Forwarded as-is | Auth result token from Thirdweb |
+| `authCookie` | ✅ | Forwarded as-is | Session cookie string |
+| `walletId` | ✅ | Forwarded as-is | Connected wallet ID |
+| `authProvider` | ✅ | Forwarded as-is | Auth provider name |
+| `error` | ✅ | Forwarded as-is | Error code if auth failed |
+| `error_description` | ✅ | Forwarded as-is | Human-readable error description |
+| `next` | ⚠️ Conditional | Must start with `/`; must not start with `//`; URL-decoded | Post-auth redirect path |
+| *Any other param* | ❌ | Dropped | Added to `droppedParamNames` in diagnostics |
+
+<Warning>
+  The `next` parameter is validated by `sanitizeNextPath`. Any value that doesn't start with `/` or starts with `//` (open-redirect vector) is silently dropped. URL-decode is attempted; if it fails, the raw value is used.
+</Warning>
+
+#### Error Callback
+
+When Thirdweb's auth fails, the deep link carries `error` and `error_description` instead of the success params:
+
+```
+wzrd://auth/thirdweb?error=access_denied&error_description=User+cancelled
+```
+
+Both parameters pass the allowlist and are forwarded to `/login` so the app can display an error message.
+
+#### Example Flow
+
+<Steps>
+  <Step title="User triggers auth">
+    The app opens a browser window pointing to the Thirdweb auth page. The configured callback URL is `wzrd://auth/thirdweb`.
+  </Step>
+  <Step title="User authorizes wallet">
+    Thirdweb redirects the browser to `wzrd://auth/thirdweb?authResult=...&walletId=...`.
+  </Step>
+  <Step title="macOS activates WZRD Studio">
+    The OS hands the URL to the Electron app via the `open-url` event.
+  </Step>
+  <Step title="Deep link resolved">
+    `resolveDeepLinkToAppUrlWithDiagnostics` maps the URL to `wzrd://app/login?authResult=...&walletId=...`.
+  </Step>
+  <Step title="App navigates">
+    The renderer navigates to `/login`, reads the auth params, calls `wallet-auth`, and stores the session.
+  </Step>
+</Steps>
+
+---
+
+### `wzrd://postz/connected` — Postz OAuth Callback
+
+Handles the OAuth return from a social media platform after the user grants Postz permission. The deep link is the `redirect_uri` registered with each platform's OAuth app. Parameters are strictly validated before being forwarded.
+
+**Resolved app URL:** `wzrd://app/postz?connected=1&<forwarded-params>`
+
+The `connected=1` query parameter is always injected regardless of what the OAuth provider sends.
+
+#### Parameter Reference
+
+| Parameter | Pattern Validation | Max Length | Description |
+|---|---|---|---|
+| `provider` | `/^[a-z0-9-]+$/i` | 64 chars | Platform name (e.g., `instagram`, `tiktok`) |
+| `channel` | `/^[a-z0-9-]+$/i` | 64 chars | Connected channel identifier |
+| `status` | `/^(success\|error\|needs_target)$/i` | 16 chars | Connection outcome; stored lowercase |
+| `state_id` | `/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i` | 36 chars | CSRF state UUID; stored lowercase |
+| *Any other param* | ❌ Dropped | — | Added to `droppedParamNames` |
+
+<Tip>
+  The `state_id` must be a valid UUID v4. WZRD Studio validates this pattern strictly to prevent CSRF attacks. Always generate a fresh UUID when initiating the OAuth flow via `postz-oauth` and compare it against the returned `state_id` in the app.
+</Tip>
+
+#### Status Values
+
+| `status` | Meaning |
+|---|---|
+| `success` | Channel connected successfully |
+| `error` | OAuth failed or was denied by the user |
+| `needs_target` | Connected but a posting target (e.g., page, channel) still needs to be selected |
+
+#### Example URLs
+
+```
+# Successful Instagram connection
+wzrd://postz/connected?provider=instagram&channel=my-channel&status=success&state_id=550e8400-e29b-41d4-a716-446655440000
+
+# Failed TikTok connection
+wzrd://postz/connected?provider=tiktok&status=error&state_id=550e8400-e29b-41d4-a716-446655440001
+
+# Connection needs a target selection
+wzrd://postz/connected?provider=youtube&status=needs_target&state_id=550e8400-e29b-41d4-a716-446655440002
+```
+
+---
+
+### `wzrd://billing/success` — Stripe Checkout Success
+
+Handles the Stripe Checkout success redirect. No parameters are forwarded.
+
+**Resolved app URL:** `wzrd://app/settings/billing?checkout=success`
+
+---
+
+### `wzrd://billing/cancel` — Stripe Checkout Cancel
+
+Handles the Stripe Checkout cancellation redirect. No parameters are forwarded.
+
+**Resolved app URL:** `wzrd://app/settings/billing?checkout=cancel`
+
+---
+
+### Unrecognized Routes
+
+Any `wzrd://` URL that doesn't match a known route resolves to the app root:
+
+**Resolved app URL:** `wzrd://app/`
+
+---
+
+## Security Model
+
+<CardGroup cols={2}>
+  <Card title="Auth Parameter Redaction" icon="eye-slash">
+    Values of `authResult`, `authCookie`, `walletId`, and `authProvider` are **never** written to logs or diagnostics. `buildUrlForLog` replaces them with `[redacted]`.
+  </Card>
+  <Card title="Open-Redirect Prevention" icon="shield">
+    The `next` parameter in auth deep links must start with `/` and must not start with `//`. This blocks open-redirect attacks where an attacker crafts `wzrd://auth/thirdweb?next=//evil.com`.
+  </Card>
+  <Card title="Strict Allowlists" icon="list-check">
+    Every route defines an explicit allowlist of accepted parameter names. Unknown parameters are silently dropped and recorded in `droppedParamNames` for diagnostics.
+  </Card>
+  <Card title="Pattern Validation" icon="magnifying-glass">
+    Postz parameters are validated against strict regex patterns with maximum length limits. The `state_id` must be a full UUID v4 to prevent injection. The `status` field only accepts three exact values.
+  </Card>
+</CardGroup>
+
+---
+
+## Registering a Custom Deep Link (Development)
+
+During development you can test deep links from the terminal:
+
+```bash
+# Trigger a Thirdweb auth callback
+open "wzrd://auth/thirdweb?authResult=test-token&walletId=0xabc123"
+
+# Simulate a successful Postz OAuth return
+open "wzrd://postz/connected?provider=instagram&channel=my-page&status=success&state_id=550e8400-e29b-41d4-a716-446655440000"
+
+# Navigate to billing success
+open "wzrd://billing/success"
+```
+
+<Info>
+  On macOS, `open` hands the URL to the default handler for the `wzrd://` scheme. WZRD Studio must be running (or will be launched) for the link to be processed. In development with `npm run dev`, the Electron app must be the registered handler — run `app.setAsDefaultProtocolClient('wzrd')` at startup.
+</Info>

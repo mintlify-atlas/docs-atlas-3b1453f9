@@ -1,0 +1,279 @@
+---
+title: "Storyboard: Generate AI Shots for Your Story"
+sidebarTitle: "Storyboard"
+description: "The WZRD Storyboard page turns your storyline into scenes and shots, then generates AI images and videos per shot in parallel using SSE streaming."
+---
+
+The Storyboard is the creative heart of WZRD Studio. Starting from a storyline, it breaks your project into scenes and shots, generates cinematic visuals for each one, and lets you review, edit, and re-generate individual shots before moving to the Director's Cut. Every generation operation — from a single shot to an entire project — can run as a streaming parallel queue, with live progress delivered via Server-Sent Events.
+
+## Route
+
+```
+/projects/:projectId/timeline
+```
+
+This is the canonical Storyboard page. Navigating here with a valid `projectId` loads the project, fetches all scenes and characters, and subscribes to Supabase Realtime for live scene and shot updates.
+
+---
+
+## Page Structure
+
+The Storyboard uses a resizable two-column layout on desktop. On mobile, the sidebar collapses into a sheet drawer accessed via the **Scene Details** button.
+
+<CardGroup cols={2}>
+  <Card title="Left Sidebar" icon="sidebar">
+    Displays scene-level metadata for the currently selected scene: description, location, lighting, weather, video style, and character details. Updates whenever a different scene row is clicked in the main content area.
+  </Card>
+  <Card title="Main Content Area" icon="film">
+    Renders one `ShotsRow` per scene, ordered by `scene_number`. Each row displays the shot cards for that scene. Selecting a scene highlights its row and updates the sidebar. A floating `+` button adds a new scene.
+  </Card>
+</CardGroup>
+
+### Data Model
+
+```
+project
+  └── scenes[]          (ordered by scene_number)
+        └── shots[]     (ordered by shot_number)
+```
+
+Each shot carries image and video generation state (`image_status`, `video_status`), URLs (`image_url`, `video_url`), and prompt fields (`prompt_idea`, `visual_prompt`, `dialogue`, `sound_effects`).
+
+---
+
+## Generating Shots with the SSE Stream
+
+New shots for a scene are created by `POST /functions/v1/gen-shots`, which streams incremental shot state back to the client. The React hook `useShotStream` manages the entire SSE life-cycle.
+
+### Endpoint
+
+```http
+POST /functions/v1/gen-shots
+Content-Type: application/json
+Accept: text/event-stream
+Authorization: Bearer <access_token>
+
+{
+  "projectId": "uuid",
+  "sceneId": "uuid",
+  "existingShots": [{ "id": "uuid", "shot_number": 1 }],
+  "shotCount": 3
+}
+```
+
+<ParamField body="projectId" type="string" required>
+  The UUID of the project. The function verifies ownership before proceeding.
+</ParamField>
+
+<ParamField body="sceneId" type="string">
+  Target scene UUID. When omitted the function uses the first scene ordered by `scene_number`.
+</ParamField>
+
+<ParamField body="existingShots" type="array">
+  Previously generated shots with `id` and `shot_number`. Used to assign the next sequential shot number and avoid duplicates.
+</ParamField>
+
+<ParamField body="shotCount" type="number">
+  Desired number of new shots. Clamped to the range `[1, 6]`; defaults to `3`.
+</ParamField>
+
+### SSE Event Reference
+
+The stream emits events in a strict phase order for each shot. Shots are streamed **in parallel** — you may receive events for shot 3 before shot 1 is `ready`.
+
+<ResponseField name="meta" type="object">
+  Emitted once, immediately after the SSE connection is established.
+
+  ```json
+  {
+    "requestId": "uuid",
+    "projectId": "uuid",
+    "sceneId": "uuid",
+    "latency": 42
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="shot" type="object">
+  Emitted at each phase transition for a shot. Merge by `id` — do **not** append blindly.
+
+  | `status` | Meaning |
+  |----------|---------|
+  | `creating` | Shot row inserted in the database; `visual_prompt` is `null` |
+  | `drafting` | `prompt_idea` and `shot_type` written; enrichment starting |
+  | `enriching` | `visual_prompt` written, `image_status` set to `prompt_ready` |
+  | `ready` | All fields populated; triggers `onShotReady` in `useShotStream` |
+
+  ```json
+  {
+    "id": "uuid",
+    "scene_id": "uuid",
+    "project_id": "uuid",
+    "shot_number": 4,
+    "status": "enriching",
+    "title": "Closing dusk",
+    "description": "A wide establishing shot as the sun dips below the horizon.",
+    "visual_prompt": "Wide establishing shot of the city skyline at dusk. Golden hour lighting, filmic detail.",
+    "thumbnail": null
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="done" type="object">
+  Terminal event signalling the stream has closed successfully.
+
+  ```json
+  { "completed": true, "total": 3, "requestId": "uuid" }
+  ```
+</ResponseField>
+
+<ResponseField name="error" type="object">
+  Emitted if the server encounters an error mid-stream. Abort the connection and surface the message.
+
+  ```json
+  { "error": "Groq rate limit exceeded", "requestId": "uuid" }
+  ```
+</ResponseField>
+
+---
+
+## The `useShotStream` Hook
+
+`useShotStream` owns the SSE connection life-cycle and exposes the following surface:
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `start(payload)` | `function` | Opens the SSE connection. Accepts the `POST /gen-shots` request body. |
+| `cancel()` | `function` | Aborts the current fetch signal; safe to call on unmount. |
+| `isStreaming` | `boolean` | `true` while an SSE connection is active. |
+| `messages` | `ShotStreamMessage[]` | All events received so far in the current session. |
+| `progress` | `{ completed, total }` | Derived from `shot` events reaching `ready` status. |
+| `onShotReady` | `callback` | Fires when a shot reaches `ready`; receives the storyboard-shaped shot payload for optimistic merge. |
+| `onError` | `callback` | Fires on `error` events or unrecoverable fetch failures. |
+
+<Note>
+  The feature flag `VITE_ENABLE_SHOT_STREAM` gates the streaming path. When set to `false`, `useShotStream` is bypassed entirely and shot creation falls back to the legacy Supabase CRUD polling flow inside `ShotsRow`.
+</Note>
+
+---
+
+## Parallel Project-Wide Generation
+
+The **Generate Missing Images / Videos** button triggers `useProjectAutoGenerate` — a hook that fetches all shots across all scenes and processes them in an adaptive concurrency queue.
+
+### Phase Logic
+
+1. **Images phase** — generates an image for every shot where `image_status !== 'completed'`.
+2. **Videos phase** — generates a video for every shot that has an image but no completed video.
+
+The hook automatically advances from `images` → `videos` after the image pass completes.
+
+### Endpoint
+
+```http
+POST /functions/v1/project-auto-generate
+Content-Type: application/json
+
+{ "project_id": "uuid", "phase": "images" }
+```
+
+Poll streaming progress via SSE:
+
+```
+GET /functions/v1/project-auto-generate/stream?project_id=<uuid>
+```
+
+### `useProjectAutoGenerate` Reference
+
+| Export | Description |
+|--------|-------------|
+| `startAutoGenerate({ imageModelId, videoModelId })` | Kicks off the queue for the determined next phase. |
+| `cancelAutoGenerate()` | Aborts the in-flight queue via an `AbortController`. |
+| `nextPhase` | `'images'` or `'videos'` — the phase that will run next. |
+| `isProcessing` | `true` while any generation is in flight. |
+| `state.progress` | `{ total, completed, active, concurrency }` updated on every task completion. |
+| `generationCounts` | `{ totalShots, missingImages, missingVideos, failedImages, failedVideos }` |
+| `fetchAllProjectShots()` | Re-fetches the full shot list from Supabase and refreshes counts. |
+
+Concurrency starts at **4** for images and **2** for videos. If rate-limit errors are detected, the adaptive algorithm automatically reduces concurrency and notifies the user.
+
+---
+
+## Credit Costs
+
+Credit costs are estimated before each bulk operation and confirmed via `ConfirmGenerateDialog`.
+
+| Operation | Credit function | Notes |
+|-----------|----------------|-------|
+| Image per shot | `getShotImageCredits(modelId?)` | Falls back to the first entry in `IMAGE_MODELS` when no model is selected |
+| Video per shot | `getShotVideoCredits(modelId?)` | Falls back to the first entry in `VIDEO_MODELS` |
+| Director's Cut | `DIRECTORS_CUT_CREDITS` | Fixed at `12` credits (derived from `fal-ai/ffmpeg-api/compose`) |
+
+The button label on the Storyboard page displays the estimated total:
+
+```
+Generate Missing Images (36 credits)   ← getShotImageCredits() × pendingCount
+Generate Missing Videos (18 credits)   ← getShotVideoCredits() × pendingCount
+```
+
+<Warning>
+  Insufficient credit balance causes the generation call to fail with a structured `InsufficientCredits` error. The app intercepts this and redirects to the billing top-up page before any credits are spent.
+</Warning>
+
+---
+
+## Confirm Generate Dialog
+
+Before any bulk operation that spends credits, `ConfirmGenerateDialog` is shown with:
+
+- The operation title (e.g. *Generate Missing Images*)
+- A description of how many shots will be processed
+- The estimated credit cost
+
+The user must explicitly confirm. Cancelling the dialog leaves the project untouched.
+
+---
+
+## MCP Tool: `render_timeline`
+
+The `render_timeline` MCP tool drives the auto-generate workflow programmatically, enabling agents to generate all shot visuals for a project without human interaction.
+
+**Skill**: `agent-skills/render-timeline/skill.md`
+
+```http
+POST /functions/v1/project-auto-generate
+Content-Type: application/json
+
+{ "project_id": "uuid", "phase": "images" }
+```
+
+Then call again with `"phase": "videos"` once the image pass completes. Poll progress via the SSE stream endpoint until the `done` event is received.
+
+---
+
+## Voice Actions
+
+The Storyboard page registers a rich set of voice actions under the `timeline` scope via `useRegisterVoiceActions`. These allow the WZRD voice agent to interact with shots hands-free.
+
+| Action | Confirmation | Description |
+|--------|-------------|-------------|
+| `get_app_context` | — | Returns the current route, selected scene/shot, and generation status |
+| `timeline_select_shot` | — | Selects a shot by `shotId`, `shotNumber`, or scene context |
+| `timeline_open_shot` | — | Selects and expands a shot card |
+| `timeline_update_shot_prompt` | — | Writes new `prompt_idea`, `visual_prompt`, `dialogue`, or `sound_effects` |
+| `timeline_generate_shot_image` | `risk: 'generation'` | Triggers image generation for a single shot |
+| `timeline_generate_all_images` | `risk: 'generation'` | Starts the project-wide image auto-generate queue |
+| `timeline_edit_shot_image` | `risk: 'generation'` | Runs an in-painting / edit pass on the current shot image |
+| `timeline_start_directors_cut` | `risk: 'generation'` | Navigates to the Director's Cut page |
+| `asset_store_save_current` | — | Saves the selected shot's output to the Asset Store |
+
+All generation actions show a credit-spend confirmation prompt before proceeding.
+
+---
+
+## Realtime Subscriptions
+
+The Storyboard maintains two Supabase Realtime channels:
+
+- **`scenes_channel`** — listens for `INSERT`, `UPDATE`, and `DELETE` events on the `scenes` table filtered by `project_id`. Any change triggers a full `fetchData()` refresh and a toast notification.
+- **`review_tasks_{projectId}`** — counts open or in-review `review_tasks` rows and displays a badge on the Observability button.

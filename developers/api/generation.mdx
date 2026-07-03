@@ -1,0 +1,643 @@
+---
+title: "Generation API: Shot Streams and Timeline Rendering"
+sidebarTitle: "Generation"
+description: "Reference for the WZRD generation endpoints: SSE shot generation stream, timeline auto-generate queue, and the unified generation service routing layer."
+---
+
+WZRD Studio's generation layer is a set of Supabase Edge Functions that sit behind a client-side **Unified Generation Service**. Every AI generation request — whether fired from the storyboard, a Studio node, or the editor — is normalized into a `GenerationInput` object, routed to the correct edge function, and returned in a consistent `GenerationResult` envelope. This page documents the HTTP contracts for each generation endpoint and explains how the client-side routing layer dispatches to them.
+
+<Note>
+  All generation endpoints are deployed as Supabase Edge Functions. The base URL is your project's `VITE_SUPABASE_URL` environment variable. Every function lives at `/functions/v1/<name>`.
+
+  **Base URL:** `https://<your-project-ref>.supabase.co/functions/v1/`
+</Note>
+
+## Authentication
+
+Every request must carry a valid Supabase JWT in the `Authorization` header.
+
+```bash
+Authorization: Bearer <supabase-access-token>
+```
+
+Obtain the token via `supabase.auth.getSession()` in the client or by exchanging a Thirdweb wallet signature through [`/functions/v1/wallet-auth`](/developers/api/edge-functions).
+
+---
+
+## POST /functions/v1/gen-shots
+
+Streams incremental shot generation updates for a storyboard scene over **Server-Sent Events (SSE)**. The server uses Groq (Llama 3.3 70B) to generate cinematic shot descriptions, inserts shot rows into the `shots` table, and pushes each phase transition as a named SSE event.
+
+<Note>
+  This endpoint is gated by the `VITE_ENABLE_SHOT_STREAM` feature flag (default: `true`). When the flag is `false`, clients must fall back to the Supabase CRUD flow for shot creation instead of calling this endpoint.
+</Note>
+
+### Request
+
+```bash
+POST /functions/v1/gen-shots
+Authorization: Bearer <supabase-jwt>
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+#### Body
+
+<ParamField body="projectId" type="string" required>
+  Supabase project identifier. Must belong to the authenticated user.
+</ParamField>
+
+<ParamField body="sceneId" type="string">
+  Scene to generate shots for. Defaults to the first scene ordered by `scene_number` when omitted.
+</ParamField>
+
+<ParamField body="existingShots" type="array">
+  Array of previously created shot summaries used to assign the next sequential shot number server-side. Clients **should** send the current ordered list when present.
+
+  <Expandable title="existingShots item schema">
+    <ParamField body="id" type="string" required>
+      Supabase shot UUID.
+    </ParamField>
+    <ParamField body="shot_number" type="integer" required>
+      Current shot number for ordering.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="shotCount" type="integer">
+  Number of shots to generate (1–6). Defaults to `3`.
+</ParamField>
+
+<ParamField body="requestId" type="string">
+  Client-supplied idempotency key. A UUID is generated server-side when omitted.
+</ParamField>
+
+#### Example
+
+```json
+{
+  "projectId": "a1b2c3d4-...",
+  "sceneId": "scene-uuid",
+  "existingShots": [
+    { "id": "shot-uuid-1", "shot_number": 1 },
+    { "id": "shot-uuid-2", "shot_number": 2 }
+  ],
+  "shotCount": 3
+}
+```
+
+### SSE Response Stream
+
+The response is `Content-Type: text/event-stream` with `Cache-Control: no-cache, no-transform` and `Connection: keep-alive`. Events are emitted in FIFO order per connection. Clients should merge `shot` events by `id` rather than appending blindly.
+
+#### `meta` — Stream Established
+
+Emitted immediately after the SSE connection is open and the project/scene context is resolved.
+
+<ResponseField name="requestId" type="string">
+  The request ID (provided or server-generated).
+</ResponseField>
+<ResponseField name="projectId" type="string">
+  Confirmed project UUID.
+</ResponseField>
+<ResponseField name="sceneId" type="string">
+  Resolved scene UUID.
+</ResponseField>
+<ResponseField name="latency" type="integer">
+  Milliseconds elapsed until the first chunk was sent.
+</ResponseField>
+
+```
+event: meta
+data: {"requestId":"...","projectId":"...","sceneId":"...","latency":0}
+```
+
+#### `shot` — Incremental Shot Update
+
+Emitted multiple times per shot as it progresses through phases. Each event represents the latest known state for that shot.
+
+<ResponseField name="id" type="string">
+  Shot UUID (stable across phase updates).
+</ResponseField>
+<ResponseField name="project_id" type="string">
+  Parent project UUID.
+</ResponseField>
+<ResponseField name="scene_id" type="string">
+  Parent scene UUID.
+</ResponseField>
+<ResponseField name="shot_number" type="integer">
+  Sequential shot number within the scene.
+</ResponseField>
+<ResponseField name="status" type="string">
+  Current generation phase: `creating` → `drafting` → `enriching` → `ready`.
+</ResponseField>
+<ResponseField name="title" type="string | null">
+  Short title derived from the shot idea (available from `drafting` phase).
+</ResponseField>
+<ResponseField name="description" type="string | null">
+  Narrative description / prompt idea text.
+</ResponseField>
+<ResponseField name="visual_prompt" type="string | null">
+  Full enriched visual prompt for image generation (available from `enriching` phase).
+</ResponseField>
+<ResponseField name="thumbnail" type="string | null">
+  Thumbnail URL (populated after image generation; `null` in the stream itself).
+</ResponseField>
+
+```
+event: shot
+data: {"id":"shot-uuid","project_id":"...","scene_id":"...","shot_number":3,"status":"enriching","title":"Golden Hour Chase","description":"A motorcycle speeds through narrow alleyways as the sun dips below the horizon.","visual_prompt":"A motorcycle speeds through narrow alleyways...Cinematic lighting, professional framing, filmic detail.","thumbnail":null}
+```
+
+<Steps>
+  <Step title="creating">
+    Shot row inserted. `title` and `visual_prompt` are `null`.
+  </Step>
+  <Step title="drafting">
+    `prompt_idea` and `shot_type` written to the database. `title` populated.
+  </Step>
+  <Step title="enriching">
+    `visual_prompt` written; `image_status` set to `prompt_ready`.
+  </Step>
+  <Step title="ready">
+    All fields populated. Trigger `onShotReady` in your UI hook to merge the shot into the timeline.
+  </Step>
+</Steps>
+
+#### `done` — Stream Complete
+
+Terminal event. No more `shot` events will follow.
+
+<ResponseField name="completed" type="boolean">
+  Always `true` on a clean completion.
+</ResponseField>
+<ResponseField name="total" type="integer">
+  Number of shots that were streamed.
+</ResponseField>
+<ResponseField name="requestId" type="string">
+  Echo of the request ID.
+</ResponseField>
+
+```
+event: done
+data: {"completed":true,"total":3,"requestId":"..."}
+```
+
+#### `error` — Stream Error
+
+Emitted if the server encounters an error mid-stream. Abort the stream and surface the message to the user.
+
+<ResponseField name="error" type="string">
+  Human-readable error message.
+</ResponseField>
+<ResponseField name="requestId" type="string">
+  Echo of the request ID.
+</ResponseField>
+
+```
+event: error
+data: {"error":"Streaming failed","requestId":"..."}
+```
+
+### Feature Flags
+
+<CardGroup cols={2}>
+  <Card title="VITE_ENABLE_SHOT_STREAM" icon="toggle-on">
+    **Default:** `true`
+
+    Enables the SSE streaming workflow. When `false`, bypass `useShotStream` entirely and revert to the Supabase `shots` CRUD flow.
+  </Card>
+  <Card title="VITE_ENABLE_STREAM_TELEMETRY" icon="chart-line">
+    **Default:** `true`
+
+    Enables client-side logging of meta/latency metrics emitted by the stream. When disabled, telemetry hooks become no-ops — the core streaming UX continues to function.
+  </Card>
+</CardGroup>
+
+### Credit Billing
+
+Credits are reserved at request time and committed on completion. The formula is `getWorkflowCreditCost('gen-shots', insertedShots / 2)`. If the stream errors before any shots are inserted, the hold is released.
+
+---
+
+## POST /functions/v1/project-auto-generate
+
+Queues parallel generation for all shots in a project. This is the batch trigger that fires image and video generation for every shot at once rather than one at a time.
+
+### Request
+
+```bash
+POST /functions/v1/project-auto-generate
+Authorization: Bearer <supabase-jwt>
+Content-Type: application/json
+```
+
+#### Body
+
+<ParamField body="project_id" type="string" required>
+  UUID of the project whose shots should be generated.
+</ParamField>
+
+<ParamField body="phase" type="string" required>
+  Generation phase to run. Either `"images"` or `"videos"`.
+</ParamField>
+
+```json
+{
+  "project_id": "a1b2c3d4-...",
+  "phase": "images"
+}
+```
+
+### Progress Stream
+
+Monitor progress in real time by subscribing to the SSE stream:
+
+```
+GET /functions/v1/project-auto-generate/stream?project_id=<project-id>
+Authorization: Bearer <supabase-jwt>
+Accept: text/event-stream
+```
+
+---
+
+## POST /functions/v1/compute-execute
+
+Executes a saved Studio compute graph for a project. The function fetches all `compute_nodes` and `compute_edges` for the project, performs a topological sort, and processes each level in parallel. Results are streamed back via SSE as nodes transition through `running` → `succeeded` / `failed` / `skipped`.
+
+### Request
+
+```bash
+POST /functions/v1/compute-execute
+Authorization: Bearer <supabase-jwt>
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+#### Body
+
+<ParamField body="projectId" type="string" required>
+  UUID of the project whose compute graph should be executed.
+</ParamField>
+
+<ParamField body="nodeIds" type="array">
+  Optional subset of node IDs to execute. When omitted, all executable nodes in the graph run. The function automatically resolves upstream dependencies for any specified nodes.
+</ParamField>
+
+<ParamField body="useCache" type="boolean">
+  Whether to use cached node outputs where available. Defaults to `true`.
+</ParamField>
+
+<ParamField body="requestId" type="string">
+  Client-supplied idempotency key for credit deduplication.
+</ParamField>
+
+#### SSE Events
+
+<ResponseField name="meta" type="object">
+  Emitted first. Contains `run_id`, `project_id`, and `total_nodes`.
+</ResponseField>
+<ResponseField name="node_status" type="object">
+  Emitted whenever a node changes state. Fields: `node_id`, `status` (`running` | `succeeded` | `failed` | `skipped`), `output` (on success), `error` (on failure), `processing_time_ms`.
+</ResponseField>
+<ResponseField name="node_progress" type="object">
+  Progress updates from long-running nodes. Fields: `node_id`, `progress` (0–100), `message`, `logs`.
+</ResponseField>
+<ResponseField name="complete" type="object">
+  Terminal event. Fields: `run_id`, `status`, `outputs` (map of nodeId → result), `completed_nodes`, `total_nodes`, `failed_nodes`.
+</ResponseField>
+<ResponseField name="error" type="object">
+  Emitted on fatal execution errors. Fields: `run_id`, `error`.
+</ResponseField>
+
+---
+
+## POST /functions/v1/director-cut
+
+Orchestrates Director's Cut assembly — syncing timeline assets, performing preflight readiness checks, and launching the export render job. Supports four actions via the `action` field.
+
+### Request
+
+```bash
+POST /functions/v1/director-cut
+Authorization: Bearer <supabase-jwt>
+Content-Type: application/json
+```
+
+#### Body
+
+<ParamField body="action" type="string" required>
+  One of `"sync"`, `"create"`, `"retry"`, or `"status"`.
+</ParamField>
+
+<ParamField body="projectId" type="string">
+  Required for `sync`, `create`, and `retry` actions.
+</ParamField>
+
+<ParamField body="jobId" type="string">
+  Required for the `status` action.
+</ParamField>
+
+<ParamField body="settings" type="object">
+  Optional export settings passed to the render pipeline.
+</ParamField>
+
+#### Actions
+
+<Accordion title="action: sync — Sync Timeline Assets">
+  Rebuilds the `timeline_assets` table for the project by walking scenes and shots in order. Returns a `DirectorCutSummary` without starting a render job.
+
+  ```json
+  { "action": "sync", "projectId": "..." }
+  ```
+
+  **Response:**
+  ```json
+  {
+    "success": true,
+    "summary": {
+      "totalShots": 12,
+      "syncedAssets": 14,
+      "visualAssets": 12,
+      "readyShots": 12,
+      "readyVideos": 8,
+      "fallbackImages": 4,
+      "missingShots": 0,
+      "audioAssets": 2,
+      "canExport": true,
+      "blockingReason": null
+    }
+  }
+  ```
+</Accordion>
+
+<Accordion title="action: create — Start a New Export Job">
+  Syncs timeline assets, runs preflight checks, and creates a new `export_jobs` row if the project is ready. Returns a job ID immediately; the render runs asynchronously.
+
+  ```json
+  { "action": "create", "projectId": "..." }
+  ```
+
+  **Response (success):**
+  ```json
+  {
+    "success": true,
+    "status": "processing",
+    "jobId": "job-uuid",
+    "progress": 5,
+    "provider": "fal_remote",
+    "providerStatus": "queued",
+    "fallbackUsed": false
+  }
+  ```
+
+  **Response (preflight failure — HTTP 409):**
+  ```json
+  {
+    "success": false,
+    "error": "DIRECTOR_CUT_PREFLIGHT_FAILED",
+    "message": "3 ordered shots are missing an image or video.",
+    "summary": { ... }
+  }
+  ```
+</Accordion>
+
+<Accordion title="action: retry — Retry a Failed Job">
+  Similar to `create` but skips the sync step. Checks readiness on existing timeline data and creates a new job if the project can export.
+</Accordion>
+
+<Accordion title="action: status — Poll Job Status">
+  Returns the current state of a running or completed export job.
+
+  ```json
+  { "action": "status", "jobId": "job-uuid" }
+  ```
+
+  **Response:**
+  ```json
+  {
+    "status": "completed",
+    "progress": 100,
+    "outputUrl": "https://storage.example.com/final-exports/...",
+    "error": null,
+    "provider": "fal_remote",
+    "providerStatus": "completed",
+    "fallbackUsed": false
+  }
+  ```
+</Accordion>
+
+---
+
+## GET /functions/v1/model-catalog
+
+Returns the full catalog of AI models available in WZRD Studio, including credit costs, provider information, and media type classifications.
+
+### Request
+
+```bash
+GET /functions/v1/model-catalog
+Authorization: Bearer <supabase-jwt>
+```
+
+### Response
+
+An array of model objects:
+
+<ResponseField name="id" type="string">
+  Canonical model ID used in generation requests (e.g., `fal-ai/flux/schnell`).
+</ResponseField>
+<ResponseField name="name" type="string">
+  Human-readable display name (e.g., `FLUX Schnell`).
+</ResponseField>
+<ResponseField name="provider" type="string">
+  AI provider: `fal-ai`, `gmi-cloud`, `lovable-ai`, etc.
+</ResponseField>
+<ResponseField name="credits" type="integer">
+  Credit cost per generation.
+</ResponseField>
+<ResponseField name="mediaType" type="string">
+  Output type: `image`, `video`, `audio`, or `text`.
+</ResponseField>
+<ResponseField name="workflowType" type="string">
+  Workflow classification: e.g., `text-to-image`, `image-to-video`, `text-to-video`, `video-edit`.
+</ResponseField>
+
+```json
+[
+  {
+    "id": "fal-ai/flux/schnell",
+    "name": "FLUX Schnell",
+    "provider": "fal-ai",
+    "credits": 3,
+    "mediaType": "image",
+    "workflowType": "text-to-image"
+  },
+  {
+    "id": "fal-ai/kling-video/o3/standard/text-to-video",
+    "name": "Kling O3 Standard T2V",
+    "provider": "fal-ai",
+    "credits": 20,
+    "mediaType": "video",
+    "workflowType": "text-to-video"
+  }
+]
+```
+
+---
+
+## Unified Generation Service
+
+The client-side **Unified Generation Service** (`src/services/unifiedGenerationService.ts`) is the single entry point for all AI generation in WZRD Studio. It normalizes inputs, selects the correct edge function, handles queue polling, optionally stores outputs to Supabase Storage, and returns a consistent result.
+
+### GenerationInput Interface
+
+```typescript
+interface GenerationInput {
+  /** Model ID from the catalog or a provider-specific ID */
+  model: string;
+  /** Primary prompt / instruction text */
+  prompt: string;
+  /** Additional model-specific parameters */
+  parameters?: Record<string, unknown>;
+  /** Reference assets (input images, videos, audio for conditioning) */
+  referenceAssets?: ReferenceAsset[];
+  /** Output configuration */
+  outputConfig?: OutputConfig;
+  /** Metadata for tracking / context */
+  metadata?: GenerationMetadata;
+}
+
+interface ReferenceAsset {
+  url: string;
+  type: 'image' | 'video' | 'audio' | 'text' | 'model';
+  role?: string;  // e.g. 'input_image', 'style_reference'
+}
+
+interface OutputConfig {
+  format?: string;            // 'png', 'mp4', 'mp3', etc.
+  count?: number;             // Number of outputs
+  storageBucket?: string;     // Supabase Storage bucket
+  storagePathPrefix?: string;
+  autoStore?: boolean;        // Auto-upload to Supabase Storage (default: true)
+}
+
+interface GenerationMetadata {
+  source?: 'project-setup' | 'studio' | 'editor' | 'storyboard' | 'timeline';
+  projectId?: string;
+  entityId?: string;   // Node / shot / clip ID
+  custom?: Record<string, unknown>;
+}
+```
+
+### GenerationResult Interface
+
+```typescript
+interface GenerationResult {
+  url: string;
+  metadata: GenerationResultMetadata;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+}
+
+interface GenerationResultMetadata {
+  generationId: string;
+  resolvedModel: string;    // Actual model used (may differ due to fallback)
+  requestedModel: string;   // Originally requested model
+  fallbackUsed: boolean;
+  fallbackReason?: string;
+  mediaType: 'image' | 'video' | 'audio' | 'text' | 'unknown';
+  credits?: number;
+  durationSeconds?: number;
+  raw?: unknown;            // Raw provider response
+  storageUrl?: string;      // Supabase Storage URL if auto-stored
+  width?: number;
+  height?: number;
+}
+```
+
+### Routing Logic
+
+The service selects a backend route by inspecting the model ID:
+
+| Route | Trigger | Edge Function |
+|---|---|---|
+| `fal-stream` | Default for all `fal-ai/*` models | `/functions/v1/fal-stream` |
+| `gmi-cloud` | `model.provider === 'gmi-cloud'` or `modelId.startsWith('gmi/')` | `/functions/v1/gmi-execute` |
+| `gemini-text` | `google/gemini-*` or `openai/gpt-*` text models | `/functions/v1/gemini-text-generation` |
+| `groq-text` | `groq/*` or `llama-*` models | `/functions/v1/groq-chat` |
+| `elevenlabs-tts` | `elevenlabs-tts` model ID | `/functions/v1/elevenlabs-tts` |
+| `elevenlabs-sfx` | `elevenlabs-sfx` model ID | `/functions/v1/elevenlabs-sfx` |
+| `elevenlabs-music` | `elevenlabs-music` model ID | `/functions/v1/elevenlabs-music` |
+| `edge-function` | `parameters._edgeFunction` is set | Named edge function |
+
+<Tip>
+  For video models, the service also checks `referenceAssets` to automatically upgrade the model to an image-to-video or reference-to-video variant when input images or videos are provided and the requested model is incompatible.
+</Tip>
+
+### Usage Examples
+
+```typescript
+import { unifiedGenerationService } from '@/services/unifiedGenerationService';
+
+// Generate an image
+const image = await unifiedGenerationService.generateImage(
+  'A cinematic wide shot of a futuristic city at sunset',
+  {
+    model: 'fal-ai/flux/schnell',
+    parameters: { image_size: 'landscape_16_9' },
+    projectId: 'my-project-id',
+    autoStore: true,
+  }
+);
+console.log(image.url); // Supabase Storage URL
+
+// Generate a video with progress tracking
+const video = await unifiedGenerationService.generateVideo(
+  'A drone flyover of a tropical island, golden hour',
+  {
+    model: 'fal-ai/kling-video/o3/standard/text-to-video',
+    parameters: { duration: '5', aspect_ratio: '16:9', generate_audio: true },
+    projectId: 'my-project-id',
+  },
+  (progress) => console.log(`${progress.percent}% — ${progress.message}`)
+);
+
+// Generate text
+const result = await unifiedGenerationService.generateText(
+  'Write a 3-sentence storyline for a sci-fi short film.',
+  { model: 'google/gemini-2.5-flash' }
+);
+const text = (result.metadata.raw as { text: string }).text;
+```
+
+### Error Types
+
+```typescript
+import { GenerationError, InsufficientCreditsError } from '@/services/unifiedGenerationService';
+
+try {
+  const result = await unifiedGenerationService.generate(input);
+} catch (error) {
+  if (error instanceof InsufficientCreditsError) {
+    console.log(`Need ${error.required} credits, have ${error.available}`);
+    // Service automatically routes to the billing top-up page
+  } else if (error instanceof GenerationError) {
+    console.error(`[${error.code}] ${error.message}`);
+  }
+}
+```
+
+| Error Code | Description |
+|---|---|
+| `insufficient_credits` | Not enough credits for the requested model |
+| `stream_error` | HTTP error from `fal-stream` |
+| `no_body` | No response body from provider |
+| `no_result` | Stream completed without a result |
+| `provider_error` | Provider returned an error event |
+| `text_error` | Text generation failed |
+| `groq_error` | Groq API error |
+| `audio_error` | Audio generation failed |
+| `edge_function_error` | Edge function invocation failed |
+| `gmi_error` | GMI Cloud error |
+| `gmi_timeout` | GMI generation timed out |
+| `unknown_route` | Unrecognized generation route |

@@ -1,0 +1,130 @@
+{
+  "projectType": "saas",
+  "projectName": "WZRD Studio",
+  "projectDescription": "WZRD Studio is an AI-powered creative desktop application for macOS that guides creators from concept to final delivery through node-based generation workflows, storyboarding, multi-track video editing, social publishing, and an agent-driven automation layer.",
+  "theme": "luma",
+  "primaryColor": "#7C3AED",
+  "lightColor": "#EDE9FE",
+  "darkColor": "#0A0D16",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Overview",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart",
+              "authentication"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/projects",
+              "concepts/credits",
+              "concepts/ai-models"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Features",
+        "groups": [
+          {
+            "group": "Creation Pipeline",
+            "pages": [
+              "features/studio-canvas",
+              "features/storyboard",
+              "features/directors-cut"
+            ]
+          },
+          {
+            "group": "Editing & Export",
+            "pages": [
+              "features/video-editor",
+              "features/clip-studio",
+              "features/kanvas"
+            ]
+          },
+          {
+            "group": "Publishing & Assets",
+            "pages": [
+              "features/postz",
+              "features/sourcify",
+              "features/ip-vault"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Developers",
+        "groups": [
+          {
+            "group": "Agent Integration",
+            "pages": [
+              "developers/mcp-server",
+              "developers/agent-skills",
+              "developers/voice-actions"
+            ]
+          },
+          {
+            "group": "API Reference",
+            "pages": [
+              "developers/api/generation",
+              "developers/api/edge-functions",
+              "developers/api/deep-links"
+            ]
+          },
+          {
+            "group": "Desktop Shell",
+            "pages": [
+              "developers/electron/architecture",
+              "developers/electron/ipc-channels"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Node-based AI generation studio (React Flow compute graph)",
+    "Storyboard generator with AI image and video shot generation",
+    "Director's Cut automated final assembly pipeline",
+    "QCut multi-track video editor with agent-drivable command API",
+    "Clip Studio with FFmpeg-powered trimming, waveform, and YouTube import",
+    "Kanvas generative remix and lyrics video composer",
+    "Postz social scheduler with OAuth multi-channel support and calendar view",
+    "Sourcify web content scraping and structured asset pipeline",
+    "IP Vault for on-chain intellectual property registration via Story Protocol",
+    "MCP server with agent skills (list-models, generate-shot, render-timeline, run-studio-graph, make-magic, edit-timeline)",
+    "Voice action layer powered by OpenAI Realtime API",
+    "Desktop deep-link scheme (wzrd://) for auth and OAuth callbacks",
+    "Thirdweb in-app wallet auth bridged to Supabase sessions",
+    "Credit-based billing with Stripe checkout and usage metering"
+  ],
+  "publicApiSurface": [
+    "POST /functions/v1/gen-shots (SSE shot generation stream)",
+    "POST /functions/v1/project-auto-generate (timeline render queue)",
+    "POST /functions/v1/compute-execute (studio compute graph execution)",
+    "POST /functions/v1/director-cut (Director's Cut assembly)",
+    "POST /functions/v1/fal / fal-stream / fal-proxy (fal.ai model proxy)",
+    "POST /functions/v1/billing-checkout (Stripe checkout session)",
+    "GET  /functions/v1/billing-catalog (plan and credit pack catalog)",
+    "POST /functions/v1/wallet-auth (Thirdweb → Supabase session bridge)",
+    "GET  /functions/v1/mcp-server (MCP tool discovery and execution)",
+    "MCP tool: list_models",
+    "MCP tool: start_shot_stream",
+    "MCP tool: render_timeline",
+    "MCP tool: run_studio_graph",
+    "MCP tool: make_magic",
+    "MCP tool: create_checkout_session",
+    "MCP tool: edit_timeline",
+    "window.wzrd.editor — renderer-global editor command API (addClip, splitElement, export, etc.)",
+    "window.wzrdDesktop — Electron preload IPC bridge (wzrd:media:*, wzrd:clip-studio:*, wzrd:qcut:*)",
+    "wzrd://auth/thirdweb — desktop deep-link: auth callback",
+    "wzrd://postz/connected — desktop deep-link: Postz OAuth callback"
+  ]
+}

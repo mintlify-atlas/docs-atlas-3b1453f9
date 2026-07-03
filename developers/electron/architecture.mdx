@@ -1,0 +1,421 @@
+---
+title: "Electron Shell Architecture in WZRD Studio"
+sidebarTitle: "Architecture"
+description: "WZRD Studio is an Electron 42 desktop app wrapping a Vite/React renderer. Learn how the main process, preload bridge, and renderer are structured."
+---
+
+WZRD Studio ships as a native macOS application built on **Electron 42**, with a **Vite 5 + React 19 + TypeScript 5.5** single-page app running in the renderer process. The shell handles deep-link routing, custom protocol registration, FFmpeg media processing, PTY session management, and a secure IPC bridge — all while keeping Node.js APIs completely out of reach of renderer JavaScript. Every privileged operation flows through a narrow, explicitly-typed IPC surface.
+
+## Process Model
+
+WZRD Studio uses the standard Electron three-layer model: a Node.js **main process**, an isolated **renderer process** (the React SPA), and a **preload script** that bridges the two. Node integration is deliberately disabled in the renderer; nothing from `node:*` can be accessed directly by React components.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Main Process  (electron/main.js — Node.js / Electron APIs)     │
+│                                                                  │
+│  • Protocol handlers (wzrd://, wzrd-media://)                   │
+│  • IPC handlers  (ipcMain.handle)                               │
+│  • FFmpeg/ffprobe child processes                               │
+│  • PTY sessions (node-pty)                                      │
+│  • Deep-link routing                                            │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │  contextBridge (preload.cjs)
+                            │  window.wzrdDesktop
+                            │  window.wzrdQcut
+┌───────────────────────────▼─────────────────────────────────────┐
+│  Renderer Process  (src/ — Vite + React 19 + TypeScript)        │
+│                                                                  │
+│  • getDesktopBridge()  → WzrdDesktopBridge | null               │
+│  • All media / clip-studio / QCut calls go through IPC          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Main Process — `electron/main.js`
+
+The entry point for the Electron shell. On startup it:
+
+1. Registers the `wzrd://` scheme as privileged before `app.ready` fires.
+2. Applies a custom `userData` path if `WZRD_DESKTOP_USER_DATA_DIR` is set.
+3. Creates a `MediaFileAccess` instance that gates which local paths the renderer may read via the `wzrd-media://` protocol.
+4. Calls `app.whenReady()` to install the application menu, protocol handler, all IPC handlers, and a permission handler (camera/microphone requests are blocked outside trusted app navigation).
+5. Enforces single-instance via `app.requestSingleInstanceLock()` — a second launch routes any deep-link argument to the existing window.
+
+<Note>
+  `electron/main.js` is an ES module (`.js` with `"type": "module"` in `package.json`). The preload script is CommonJS (`preload.cjs`) because Electron requires synchronous `require()` in preload context.
+</Note>
+
+### Key helpers in `main.js`
+
+| Function | Purpose |
+|---|---|
+| `createMainWindow()` | Creates the `BrowserWindow`, wires navigation guards, loads the start URL |
+| `installIpcHandlers()` | Registers all `ipcMain.handle` listeners for media, clip-studio, and media file access |
+| `installProtocolHandler()` | Attaches the `wzrd://` protocol handler via `protocol.handle` |
+| `installPermissionHandler()` | Blocks all browser permission requests except `media` from trusted app URLs |
+| `routeDeepLink(rawUrl)` | Translates a `wzrd://` deep-link to an app URL and loads it (or queues it as `pendingDeepLink`) |
+| `sendMediaProgress(operationId, progress)` | Pushes `wzrd:media:progress` events to the renderer during long FFmpeg operations |
+| `sendFfmpegProgress(operationId, progress)` | Pushes `wzrd:clip-studio:ffmpeg-progress` events |
+| `sendYoutubeDownloadProgress(operationId, progress)` | Pushes `wzrd:clip-studio:youtube-download-progress` events |
+
+## Preload Bridge — `electron/preload.cjs`
+
+The preload script uses Electron's `contextBridge` to expose two globals to the renderer — **no Node.js APIs are leaked**. All calls are wrapped in `ipcRenderer.invoke` (request/response) or `ipcRenderer.on` (push events).
+
+<Tabs>
+  <Tab title="window.wzrdDesktop">
+    Exposes the core media and Clip Studio operations used by the React app. All methods return `Promise` (or, for event subscriptions, a cleanup function).
+
+    ```typescript
+    // Declared in src/lib/desktop.ts
+    interface WzrdDesktopBridge {
+      isDesktop: true;
+      platform: string;
+      openExternal: (url: string) => Promise<boolean>;
+      getDeepLink: (path: string) => string;
+      // Media
+      probeMedia: (params: { filePath: string; ffmpegPath?: string }) => Promise<DesktopVideoMetadata>;
+      extractThumbnail: (params: { operationId: string; sourcePath: string; outputPath: string; atMs: number }) => Promise<{ outputPath: string }>;
+      extractWaveformPeaks: (params: { operationId: string; sourcePath: string; resolution?: number; sampleRate?: number }) => Promise<{ peaks: number[] }>;
+      renderPreviewProxy: (params: { operationId: string; sourcePath: string; outputPath: string }) => Promise<{ outputPath: string }>;
+      renderTimeline: (params: { operationId: string; timeline: LocalTimelineRenderPlan; outputPath: string }) => Promise<{ outputPath: string }>;
+      runStudioMediaAction: (params: { operationId: string; actionId: string; outputFolder: string }) => Promise<{ outputPath?: string; outputs?: Array<{ type: string; path?: string }> }>;
+      cacheRemoteMedia: (params: { operationId: string; url: string; name?: string }) => Promise<{ path: string; mediaUrl: string }>;
+      // Clip Studio
+      cutClip: (params: { operationId: string; sourcePath: string; outputPath: string; startSeconds: number; durationSeconds: number }) => Promise<{ outputPath: string }>;
+      exportVerticalClip: (params: { operationId: string; sourcePath: string; outputPath: string }) => Promise<{ outputPath: string }>;
+      downloadYoutubeVideo: (params: { operationId: string; url: string }) => Promise<DesktopYoutubeDownloadResult>;
+      // Progress subscriptions (return unsubscribe fn)
+      onFfmpegProgress: (cb: (p: DesktopFfmpegProgress) => void) => () => void;
+      onMediaProgress: (cb: (p: DesktopFfmpegProgress) => void) => () => void;
+      onYoutubeDownloadProgress: (cb: (p: DesktopYoutubeDownloadProgress) => void) => () => void;
+    }
+    ```
+  </Tab>
+  <Tab title="window.wzrdQcut">
+    Exposes the QCut bridge for the AI editor engine: FFmpeg CLI export sessions, PTY terminal sessions, project folder management, and skills.
+
+    ```typescript
+    interface WzrdQcutBridge {
+      ffmpeg: {
+        getPath: () => Promise<string>;
+        checkHealth: () => Promise<{ ffmpegOk: boolean; ffprobeOk: boolean; ffmpegPath: string }>;
+        createExportSession: () => Promise<{ sessionId: string; framesDir: string }>;
+        saveFrame: (params: { sessionId: string; frameNumber: number; imageData: Uint8Array }) => Promise<{ success: boolean }>;
+        exportVideoCLI: (options: ExportOptions) => Promise<{ success: boolean; outputFile?: string }>;
+        extractAudio: (params: { videoPath: string; format?: string }) => Promise<{ audioPath: string }>;
+        cleanupExportSession: (sessionId: string) => Promise<boolean>;
+      };
+      pty: {
+        spawn: (options: { shell?: string; command?: string; cwd?: string; cols?: number; rows?: number }) => Promise<{ success: boolean; sessionId: string }>;
+        write: (sessionId: string, data: string) => Promise<void>;
+        resize: (sessionId: string, cols: number, rows: number) => Promise<void>;
+        kill: (sessionId: string) => Promise<void>;
+        onData: (cb: (payload: { sessionId: string; data: string }) => void) => () => void;
+        onExit: (cb: (payload: { sessionId: string; exitCode: number }) => void) => () => void;
+      };
+      projectFolder: {
+        getRoot: (projectId: string) => Promise<string>;
+        list: (projectId: string, subPath?: string) => Promise<DirectoryEntry[]>;
+        scan: (projectId: string, subPath?: string, options?: ScanOptions) => Promise<ScanResult>;
+        ensureStructure: (projectId: string) => Promise<void>;
+      };
+      skills: {
+        list: (projectId: string) => Promise<Skill[]>;
+        import: (projectId: string, sourcePath: string) => Promise<Skill | null>;
+        delete: (projectId: string, skillId: string) => Promise<boolean>;
+        getContent: (projectId: string, skillId: string, filename: string) => Promise<string | null>;
+        syncForClaude: (projectId: string) => Promise<{ synced: boolean; copied: number }>;
+      };
+      agentCommand: {
+        notifyReady: (payload: unknown) => void;
+        onRequest: (cb: (payload: unknown) => void) => () => void;
+        respond: (payload: unknown) => void;
+      };
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Renderer — `src/`
+
+The React SPA is a Vite 5 project compiled to `dist/` and served via the `wzrd://app/` protocol. In development mode (`ELECTRON_RENDERER_URL` env set) Electron loads the Vite dev server URL directly.
+
+### Desktop Bridge Detection
+
+Renderer code detects the desktop context using `getDesktopBridge()` from `src/lib/desktop.ts`. In a web browser the function returns `null`, allowing WZRD Studio to run as a progressive web app as well.
+
+```typescript
+import { getDesktopBridge, isDesktopRuntime } from '@/lib/desktop';
+
+// Returns WzrdDesktopBridge | null
+const bridge = getDesktopBridge();
+
+if (bridge) {
+  // Running inside Electron — full media processing available
+  const metadata = await bridge.probeMedia({ filePath: '/path/to/video.mp4' });
+} else {
+  // Running in browser — fall back to cloud processing
+}
+```
+
+```typescript
+// Full type signature from src/lib/desktop.ts
+export function getDesktopBridge(): WzrdDesktopBridge | null {
+  if (typeof window === 'undefined') return null;
+  const bridge = window.wzrdDesktop;
+  return bridge?.isDesktop ? bridge : null;
+}
+
+export function isDesktopRuntime(): boolean {
+  return getDesktopBridge() !== null;
+}
+```
+
+<Tip>
+  Always check `getDesktopBridge()` before calling any `window.wzrdDesktop` method. The same React components render in both desktop and web mode.
+</Tip>
+
+## Security Model
+
+WZRD Studio enforces a strict security posture in the renderer:
+
+| Setting | Value | Effect |
+|---|---|---|
+| `contextIsolation` | `true` | Renderer JS cannot access the preload script's Node scope |
+| `nodeIntegration` | `false` | No `require()` or Node APIs in renderer |
+| `sandbox` | `true` | Renderer runs in Chromium sandbox |
+| `webSecurity` | `true` | Same-origin policy enforced |
+| `allowRunningInsecureContent` | `false` | Blocks mixed content |
+
+External navigation is intercepted on `will-navigate` and `setWindowOpenHandler`. Only `https://`, `http://`, and `mailto:` URLs are allowed to open in the system browser. All other navigations are blocked.
+
+```javascript
+// electron/window-options.js
+export function createMainWindowOptions({ preloadPath, iconPath } = {}) {
+  return {
+    width: 1440,
+    height: 960,
+    minWidth: 1100,
+    minHeight: 720,
+    title: "WZRD Studio",
+    backgroundColor: "#050506",
+    show: false,
+    webPreferences: {
+      preload: preloadPath,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      devTools: true,
+    },
+  };
+}
+```
+
+## Protocol Registration
+
+Two custom URL schemes are registered before `app.ready`.
+
+<Accordion title="wzrd:// — App and Media Protocol">
+  Registered with `protocol.registerSchemesAsPrivileged` as `standard`, `secure`, `supportFetchAPI`, `corsEnabled`, and `stream`.
+
+  Two sub-hosts are served under this scheme:
+
+  | Host | Example URL | Serves |
+  |---|---|---|
+  | `app` | `wzrd://app/editor` | Compiled React SPA from `dist/` (falls back to `index.html` for SPA routing) |
+  | `media` | `wzrd://media/?file=%2Fpath%2Fto%2Fvideo.mp4` | Local media files from the allow-list |
+
+  The protocol handler in `main.js` routes requests via `resolveAppProtocolRequest` (app assets) and `resolveClipperMediaProtocolRequest` (local media). Path traversal is rejected at both layers.
+
+  ```javascript
+  // electron/protocol.js
+  export const WZRD_PROTOCOL = "wzrd";
+  export const WZRD_APP_HOST  = "app";
+  export const WZRD_MEDIA_HOST = "media";
+
+  // Build a playback URL for a local file:
+  buildClipperMediaUrl('/Users/alice/clips/intro.mp4')
+  // → "wzrd://media/?file=%2FUsers%2Falice%2Fclips%2Fintro.mp4"
+  ```
+</Accordion>
+
+<Accordion title="wzrd:// Deep Links">
+  `app.setAsDefaultProtocolClient("wzrd")` makes the app handle `wzrd://` URIs from the OS. `resolveDeepLinkToAppUrlWithDiagnostics` maps each route to an in-app URL:
+
+  | Deep-link route | Maps to |
+  |---|---|
+  | `wzrd://auth/thirdweb` | `/login?authResult=…` |
+  | `wzrd://billing/success` | `/settings/billing?checkout=success` |
+  | `wzrd://billing/cancel` | `/settings/billing?checkout=cancel` |
+  | `wzrd://postz/connected` | `/postz?connected=1&provider=…` |
+
+  Auth parameter values are redacted in `~/Library/Logs/WZRD Studio/desktop.log`.
+</Accordion>
+
+## FFmpeg Toolchain
+
+All media processing delegates to an FFmpeg binary on the host system. The shell provides three toolchain helpers:
+
+<Accordion title="resolveFfmpegToolchain (media-ffmpeg-runtime.js)">
+  Searches common macOS installation paths for `ffmpeg` and a co-located `ffprobe`:
+
+  ```
+  /opt/homebrew/bin/ffmpeg     (Homebrew Apple Silicon)
+  /usr/local/bin/ffmpeg        (Homebrew Intel)
+  $HOME/.local/bin/ffmpeg
+  ffmpeg                       (PATH fallback)
+  ```
+
+  Returns a `FfmpegToolchain` object:
+
+  ```typescript
+  interface FfmpegToolchain {
+    available: boolean;
+    version?: string;
+    ffmpegPath: string;
+    ffprobePath: string;
+    ffprobeAvailable: boolean;
+    diagnostics: string[];
+    error?: string;
+  }
+  ```
+</Accordion>
+
+<Accordion title="preflightFfmpegExport">
+  Called before every export job. Verifies:
+  - Source file is readable.
+  - Output directory is writable (writes a probe file).
+  - `libx264` encoder is present.
+  - `aac` encoder is present.
+
+  Throws a user-readable error if any check fails.
+</Accordion>
+
+<Accordion title="normalizeFfmpegFailure">
+  Maps raw FFmpeg exit codes, signals, and `stderr` tails to user-friendly error messages, including specific messages for:
+  - `ENOENT` / binary not found
+  - Missing `libx264` or `aac` encoders
+  - Permission-denied output paths
+  - Filter-graph failures
+</Accordion>
+
+## Media File Access Control
+
+Only explicitly allow-listed paths can be served via `wzrd://media/`. The allow-list is managed by `createMediaFileAccess` in `electron/media-file-access.js`.
+
+```javascript
+// electron/media-file-access.js
+export function createMediaFileAccess({ roots = [] } = {}) {
+  const allowedMediaPaths = new Set();
+  return {
+    allowMediaPath(filePath) { /* adds resolved path to set */ },
+    isAllowedMediaPath(filePath) { /* checks set + roots */ },
+  };
+}
+```
+
+Paths are added to the set when:
+- The user selects a file via `showOpenDialog`.
+- A YouTube video finishes downloading to `userData/clipper/imports/`.
+- A remote media URL is cached to `userData/media-cache/`.
+- An FFmpeg export writes its output file.
+
+Two helper utilities are also exported:
+
+- **`isPathInside(rootDir, filePath)`** — strict path containment check (no symlink tricks).
+- **`safeFileStem(value)`** — strips unsafe characters from a filename stem for use in cache paths.
+- **`extensionForRemoteMedia(url, contentType)`** — infers a file extension from a remote URL and its `Content-Type` header.
+
+## QCut Bridge — `electron/qcut-bridge.js`
+
+`setupQcutBridge()` registers the `wzrd:qcut:*` IPC namespace used by WZRD's AI editor engine. It provides:
+
+- **FFmpeg export sessions** — frame-by-frame canvas rendering → `ffmpeg` CLI composition.
+- **PTY sessions** — full `xterm`-compatible pseudo-terminal via `node-pty` (unpacked from asar to allow native bindings).
+- **Project folder management** — per-project `userData/qcut-projects/<id>/` hierarchy with `media/`, `skills/`, and `exports/` sub-directories.
+- **Skills** — markdown-based instruction files bundled with the app and synced to `~/.claude/skills/` for the Claude CLI.
+- **MCP server** — a local Model Context Protocol server started alongside the bridge.
+- **Agent command channel** — bidirectional command/response channel for the agent API, protected by a permission gate.
+
+<Warning>
+  `node-pty` contains native binaries and must be **excluded from the asar archive**. The `electron-builder` config sets `asarUnpack: ['node_modules/node-pty/**']` to handle this automatically.
+</Warning>
+
+## Agent Relay — `packages/wzrd-agent-relay/`
+
+A Cloudflare Worker at `packages/wzrd-agent-relay/src/index.ts` acts as a WebSocket relay for agent PTY sessions. It uses Cloudflare Durable Objects (`WzrdAgentPtySession`) to maintain session state and authenticates via a JWT verified against `DAYTONA_RELAY_JWT_SECRET`.
+
+```typescript
+// packages/wzrd-agent-relay/src/index.ts
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+    if (url.pathname !== '/pty') return new Response('not_found', { status: 404 });
+    const token = url.searchParams.get('token');
+    if (!token) return new Response('missing_token', { status: 400 });
+    const sessionId = peekSessionId(token);
+    if (!sessionId) return new Response('bad_token', { status: 400 });
+    const id = env.WZRD_AGENT_PTY.idFromName(sessionId);
+    return env.WZRD_AGENT_PTY.get(id).fetch(req);
+  },
+};
+```
+
+The relay requires these Worker environment bindings:
+
+| Binding | Type | Purpose |
+|---|---|---|
+| `WZRD_AGENT_PTY` | Durable Object namespace | Stores per-session PTY state |
+| `SUPABASE_URL` | Secret | Validates user sessions |
+| `SUPABASE_SERVICE_ROLE_KEY` | Secret | Service-level Supabase access |
+| `DAYTONA_API_KEY` | Secret | Daytona SDK authentication |
+| `DAYTONA_RELAY_JWT_SECRET` | Secret | Signs and verifies relay JWTs |
+
+## Build & Packaging
+
+WZRD Studio targets macOS Apple Silicon (`arm64`). The build pipeline uses `electron-builder` invoked via `bun run desktop:dist:mac`.
+
+```bash
+# Build the macOS DMG
+bun run desktop:dist:mac
+
+# Outputs:
+# release/wzrdstudiofinal555-apfs.dmg
+# release/mac-arm64/WZRD Studio.app
+```
+
+Key build settings:
+
+| Setting | Value |
+|---|---|
+| App ID | `com.wzrd.studio` |
+| DMG artifact | `wzrdstudiofinal555-apfs.dmg` |
+| Target arch | `arm64` |
+| asar | `true` |
+| `asarUnpack` | `node_modules/node-pty/**` |
+| `afterPack` | Custom post-packaging script |
+
+<Note>
+  The DMG is currently **unsigned and un-notarized**. On first launch, macOS Gatekeeper will block it. Users must right-click → Open, or approve it in System Settings → Privacy & Security → Open Anyway.
+</Note>
+
+### Development Mode
+
+```bash
+# Start the Vite renderer dev server
+bun run dev
+
+# Start Electron pointing at the dev server
+bun run desktop:dev
+
+# Run targeted unit tests
+bun x vitest run src/lib/desktop.test.ts electron/deep-links.test.js
+
+# Lint
+bun run lint
+```
+
+In dev mode, `ELECTRON_RENDERER_URL` is set to the Vite dev server URL. The main process loads that URL instead of the compiled `dist/` bundle, and Electron DevTools are enabled.

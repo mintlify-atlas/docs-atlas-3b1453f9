@@ -1,0 +1,284 @@
+---
+title: "Video Editor: Multi-Track Timeline with Agent Control"
+sidebarTitle: "Video Editor"
+description: "The WZRD Video Editor is powered by QCut: a multi-track timeline, media panel, native FFmpeg export, and a typed agent command API for programmatic edits."
+---
+
+The WZRD Video Editor is the full-featured, agent-drivable timeline at the heart of WZRD Studio. It is powered by **QCut** — a vendored, deeply integrated editor that provides multi-track video and audio editing, a rich media panel, multiple export engines, and a typed command surface so AI agents, voice commands, and MCP tool calls can drive every editing action. Every mutation the agent makes is pushed through QCut's command history, meaning you can undo agent edits one keystroke at a time just like manual ones.
+
+## Routes
+
+| URL pattern | Notes |
+|---|---|
+| `/projects/:projectId/editor` | Canonical route — mounts QCut |
+| `/editor/:projectId` | Legacy redirect alias |
+| `/video-editor/:projectId` | Legacy redirect alias |
+
+Adding `?legacy=1` to any of the above loads the original `VideoEditor` component instead of QCut, providing a fallback path while the new editor is being validated.
+
+```typescript
+// src/pages/EditorPage.tsx (simplified)
+const EditorPage = () => {
+  const { projectId } = useParams<{ projectId?: string }>();
+  const [searchParams] = useSearchParams();
+  const legacy = searchParams.get("legacy") === "1";
+
+  return legacy ? (
+    <VideoEditorProvider>
+      <VideoEditor />
+    </VideoEditorProvider>
+  ) : (
+    <QCutEditor projectId={projectId} />
+  );
+};
+```
+
+## QCut Integration
+
+QCut replaces the legacy `VideoEditor` component at the `/editor` route while every other page in WZRD Studio remains untouched. All QCut code lives in the quarantined `src/qcut/` directory and only `EditorPage` and `QCutEditor` may import from it.
+
+<CardGroup cols={2}>
+  <Card title="Multi-Track Timeline" icon="film">
+    Import media, layer video and image clips on independent tracks, add audio tracks, trim/split/snap with frame-level precision, and animate with keyframes.
+  </Card>
+  <Card title="Platform Adapter" icon="plug">
+    QCut's platform calls are bridged to WZRD's `window.wzrdDesktop` IPC, Supabase, and fal/credits plumbing via a dedicated `createWzrdAdapter()`.
+  </Card>
+  <Card title="Native FFmpeg Export" icon="bolt">
+    On macOS desktop, a generic FFmpeg runner (`wzrd:qcut:ffmpeg-run`) is wired through the existing `media-ffmpeg-runtime.js` binary resolution and streams real-time progress back to the UI.
+  </Card>
+  <Card title="Undo-Safe Agent Edits" icon="rotate-ccw">
+    Every agent command flows through QCut's command history stack. The user can undo any agent-made edit with standard `⌘Z`.
+  </Card>
+</CardGroup>
+
+## Timeline Composition Model
+
+The editor state is backed by `videoEditorStore` (Zustand). Key types from `src/store/videoEditorStore.ts`:
+
+<Tabs>
+  <Tab title="Clip">
+    ```typescript
+    interface Clip {
+      id: string;
+      type: 'video' | 'image' | 'text' | 'element';
+      startTime: number;       // ms from timeline start
+      duration: number;        // ms
+      layer: number;           // track layer index
+      trimStart?: number;      // ms trim from source start
+      trimEnd?: number;        // ms trim from source end
+      transition?: ClipTransition;
+      effects?: ClipEffect[];
+      masks?: ClipMask[];
+      transforms: {
+        position: { x: number; y: number };
+        scale: { x: number; y: number };
+        rotation: number;
+        opacity: number;
+      };
+    }
+    ```
+  </Tab>
+  <Tab title="AudioTrack">
+    ```typescript
+    interface AudioTrack {
+      id: string;
+      type: 'audio';
+      startTime: number;
+      duration: number;
+      volume: number;
+      isMuted: boolean;
+      fadeInDuration?: number;
+      fadeOutDuration?: number;
+      playbackRate?: number;
+    }
+    ```
+  </Tab>
+  <Tab title="CompositionSettings">
+    ```typescript
+    interface CompositionSettings {
+      width: number;
+      height: number;
+      fps: number;
+      aspectRatio: '16:9' | '9:16' | '1:1' | '4:3';
+      duration: number;
+      backgroundColor: string;
+    }
+    ```
+  </Tab>
+</Tabs>
+
+Supported clip transitions: `fade`, `dissolve`, `wipe`, `slide`, `zoom`, `blur`, `none`.
+
+Supported effects: `blur`, `brightness`, `contrast`, `saturation`, `exposure`, `sharpen`, `grayscale`, `sepia`, `invert`, `vignette`, `grain`, `noise`.
+
+Supported masks: `rectangle`, `ellipse`.
+
+## Export Engines
+
+The editor selects an export engine at runtime based on platform capability via `export-engine-factory.ts`:
+
+<Accordion title="Canvas Renderer">
+  Browser-based canvas compositing for lightweight in-browser export. Available in all environments.
+</Accordion>
+
+<Accordion title="MediaRecorder">
+  Records the live preview canvas stream using the Web MediaRecorder API. Available in all environments.
+</Accordion>
+
+<Accordion title="Native FFmpeg CLI (Desktop Only)">
+  Uses the bundled FFmpeg binary (`wzrd:qcut:ffmpeg-run` IPC channel) for full-fidelity, hardware-accelerated rendering. Selected automatically when WZRD Studio Desktop is running on macOS. Supports quality presets (`low` → CRF 28, `medium` → CRF 23, `high` → CRF 18, `4k` → CRF 16), keyframe-animated transforms, opacity, scale, rotation, per-track effects, and masking.
+
+  ```javascript
+  // electron/media-ffmpeg-commands.js (simplified)
+  export function buildRenderTimelineArgs({ timeline, outputPath }) {
+    // Builds the full FFmpeg filter_complex graph from
+    // timeline.visualTracks + timeline.audioTracks,
+    // with keyframe expressions, effect chains, and mask filters.
+  }
+  ```
+</Accordion>
+
+<Accordion title="Remotion Engine">
+  Renders the timeline as a Remotion composition using `@remotion/player` for preview and `remotion render` for headless export. Used by the `EditorComposition` component.
+</Accordion>
+
+## Media Panel Tabs
+
+The QCut media panel exposes the full set of editor tabs:
+
+<CardGroup cols={3}>
+  <Card title="Media" icon="photo-film">Import and manage project assets</Card>
+  <Card title="Text" icon="type">Add and style text overlays</Card>
+  <Card title="Stickers" icon="smile">Animated sticker overlays</Card>
+  <Card title="Effects" icon="wand-magic-sparkles">Video and image effects</Card>
+  <Card title="Transitions" icon="arrows-left-right">Clip-to-clip transitions</Card>
+  <Card title="Filters" icon="sliders">Color and style filters</Card>
+  <Card title="Text-to-Image" icon="image">AI image generation panel</Card>
+  <Card title="Terminal (PTY)" icon="terminal">Claude CLI session scoped to the project folder (Desktop only)</Card>
+  <Card title="AI Chat" icon="message-bot">In-editor AI chat via pi-agent (Desktop only)</Card>
+</CardGroup>
+
+<Note>
+  Terminal (PTY) and AI chat tabs require WZRD Studio Desktop. In web/browser mode these tabs display a graceful unsupported state.
+</Note>
+
+## Agent Command API
+
+When the editor is mounted, `window.wzrd.editor` exposes a typed command façade over the vendored QCut stores. Every command is schema-validated and rejects when no editor is open.
+
+```typescript
+// All commands available on window.wzrd.editor
+window.wzrd.editor.getProjectState()
+window.wzrd.editor.listMedia()
+window.wzrd.editor.importMediaByUrl({ url: string; name?: string })
+window.wzrd.editor.addClip({ mediaId: string; startTime: number; trackIndex?: number })
+window.wzrd.editor.splitElement({ trackId: string; elementId: string; splitTime: number })
+window.wzrd.editor.trimElement({ elementId: string; trimStart?: number; trimEnd?: number })
+window.wzrd.editor.moveElement({ elementId: string; startTime: number; trackIndex?: number })
+window.wzrd.editor.deleteElement({ elementId: string })
+window.wzrd.editor.addTrack({ type: 'video' | 'audio' })
+window.wzrd.editor.setText({ elementId: string; text: string })
+window.wzrd.editor.applyEffect({ elementId: string; effectId: string; params?: Record<string, number> })
+window.wzrd.editor.addCaptionsFromTranscript({ transcript: TranscriptSegment[] })
+window.wzrd.editor.setPlayhead({ timeMs: number })
+window.wzrd.editor.selectElements({ elementIds: string[] })
+window.wzrd.editor.undo()
+window.wzrd.editor.redo()
+window.wzrd.editor.export({ preset: '720p' | '1080p' | '4k'; format?: 'mp4'; filename?: string })
+window.wzrd.editor.getExportStatus()
+```
+
+### MCP Tool: `edit_timeline`
+
+The editor is also reachable as an MCP tool from any Claude session (including the in-editor terminal):
+
+<Steps>
+  <Step title="Start the local MCP server">
+    The desktop app hosts a JSON-RPC 2.0 server at `http://127.0.0.1:32145`. If that port is taken the server binds a random port — query `window.wzrdQcut.mcp.getInfo()` in DevTools for the live address.
+  </Step>
+  <Step title="Get your auth token">
+    ```javascript
+    // Run in DevTools console on the /editor page
+    const info = await window.wzrdQcut.mcp.getInfo();
+    console.log(info.authorizationHeader); // "Bearer <token>"
+    ```
+  </Step>
+  <Step title="Call edit_timeline">
+    ```json
+    POST http://127.0.0.1:32145
+    Authorization: Bearer <token>
+    Content-Type: application/json
+
+    {
+      "command": "importMediaByUrl",
+      "args": { "url": "https://example.com/clip.mp4", "name": "Intro" }
+    }
+    ```
+  </Step>
+</Steps>
+
+#### Example agent workflow
+
+```json
+// 1. Import a clip
+{ "command": "importMediaByUrl", "args": { "url": "https://.../clip.mp4" } }
+
+// 2. Place it at the start of the timeline
+{ "command": "addClip", "args": { "mediaId": "<id>", "startTime": 0 } }
+
+// 3. Split at 3 seconds
+{ "command": "splitElement", "args": { "elementId": "<id>", "splitTime": 3 } }
+
+// 4. Add a title overlay
+{ "command": "addText", "args": { "content": "Episode 1", "startTime": 0, "duration": 4 } }
+
+// 5. Export 720p MP4
+{ "command": "export", "args": { "preset": "720p", "format": "mp4", "filename": "episode-1.mp4" } }
+
+// 6. Poll for completion
+{ "command": "getExportStatus", "args": {} }
+```
+
+### Voice Integration
+
+The editor registers voice actions with WZRD's `VoiceAgentProvider`. When on the `/editor` route, voice commands like "split the clip at the playhead" or "export 1080p" are routed through the same typed command façade as MCP calls.
+
+## FFmpeg Timeline Render
+
+The native FFmpeg render path (`buildRenderTimelineArgs`) compiles the full QCut timeline into a single `ffmpeg` command with a `filter_complex` graph. Key capabilities:
+
+- **Visual track ordering** by `layer` then `startMs`
+- **Keyframe-animated** position, scale, rotation, and opacity using linear interpolation expressions
+- **Per-track effects**: blur (`boxblur`), brightness/contrast/saturation (`eq`), sharpen (`unsharp`), grayscale/sepia/invert, vignette, grain/noise
+- **Masks**: rectangle and ellipse via `geq` alpha expressions
+- **Audio mixing**: `amix` with per-track volume keyframes, `atempo` for speed changes, fade in/out, and `adelay` for timeline positioning
+- **Text overlays**: `drawtext` with dynamic `x`/`y` position expressions; falls back to intermediate canvas layers for rotated or opacity-animated text
+- **Graphic elements**: `drawbox` for rectangles, `geq` for ellipses and lines, with full keyframe support
+
+```bash
+# Quality presets (CRF values)
+low:    -crf 28
+medium: -crf 23
+high:   -crf 18   # default
+4k:     -crf 16
+```
+
+<Warning>
+  Native FFmpeg export requires WZRD Studio Desktop with FFmpeg accessible on the system `PATH` or configured via the ffmpeg path override in settings. The wasm/MediaRecorder fallback is always available in the browser.
+</Warning>
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|---|---|
+| `Space` | Play / Pause |
+| `⌘Z` | Undo (works for both manual and agent edits) |
+| `⌘⇧Z` | Redo |
+| `⌘C` | Copy selected clips |
+| `⌘V` | Paste clipboard |
+| `←` / `→` | Step playhead one frame |
+| `+` / `=` | Zoom timeline in |
+| `-` | Zoom timeline out |
+| `F` | Fit selected clip in view |
+| `⇧F` | Fit full timeline in view |

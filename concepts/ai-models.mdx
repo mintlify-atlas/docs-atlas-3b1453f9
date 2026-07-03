@@ -1,0 +1,466 @@
+---
+title: "AI Models Available in WZRD Studio"
+sidebarTitle: "AI Models"
+description: "WZRD Studio routes generation requests across image, video, audio, and text models. Learn what models are available and how routing works."
+---
+
+WZRD Studio exposes a unified catalog of AI models spanning four media types: **image**, **video**, **audio**, and **text**. Every generation request — whether triggered from the Studio node canvas, the Timeline shot panel, the Editor, or project setup — flows through `unifiedGenerationService`, a single service layer that resolves model IDs, validates inputs, charges credits, and dispatches the request to the correct backend provider.
+
+## Architecture Overview
+
+```
+┌───────────────────────────────────────────────────────────┐
+│                     Client Code                           │
+│  (Project Setup · Studio Nodes · Editor · Storyboard)     │
+└──────────────────────┬────────────────────────────────────┘
+                       │
+                       ▼
+         ┌─────────────────────────┐
+         │ unifiedGenerationService│   src/services/unifiedGenerationService.ts
+         │   .generate(input)      │
+         └────────────┬────────────┘
+                      │  routes by model ID
+        ┌─────────────┼───────────────────┐
+        ▼             ▼                   ▼
+   fal-stream    gemini-text         elevenlabs-*
+  (fal.ai proxy)  (Groq/Gemini)     (TTS/SFX/Music)
+        │             │                   │
+        ▼             ▼                   ▼
+  Supabase Edge Functions (cloud)
+```
+
+**Key source files:**
+
+| File | Purpose |
+|------|---------|
+| `src/services/unifiedGenerationService.ts` | Core service — input validation, routing, result normalization |
+| `src/lib/studio-model-constants.ts` | Model catalog — IDs, names, credits, defaults, supported params |
+| `src/lib/constants/credits.ts` | Credit cost helpers and pre-built lookup maps |
+| `src/lib/falModelNormalization.ts` | Model alias resolution and canonical input building |
+
+## The `GenerationInput` Interface
+
+Every generation call accepts a `GenerationInput` object:
+
+```typescript
+interface GenerationInput {
+  /** Model ID from the catalog or a provider-specific ID */
+  model: string;
+  /** Primary prompt / instruction text */
+  prompt: string;
+  /** Additional model-specific parameters */
+  parameters?: Record<string, unknown>;
+  /** Reference assets (input images, videos, audio) */
+  referenceAssets?: ReferenceAsset[];
+  /** Output configuration */
+  outputConfig?: OutputConfig;
+  /** Tracking metadata */
+  metadata?: GenerationMetadata;
+}
+
+interface ReferenceAsset {
+  url: string;
+  type: 'image' | 'video' | 'audio' | 'text';
+  role?: string; // e.g. 'input_image', 'style_reference'
+}
+
+interface OutputConfig {
+  format?: string;            // 'png', 'mp4', 'mp3', etc.
+  count?: number;             // Number of outputs
+  storageBucket?: string;     // Supabase Storage bucket
+  storagePathPrefix?: string;
+  autoStore?: boolean;        // Auto-upload to Supabase Storage (default: true)
+}
+
+interface GenerationMetadata {
+  source?: 'project-setup' | 'studio' | 'editor' | 'storyboard' | 'timeline';
+  projectId?: string;
+  entityId?: string;          // Node / shot / clip ID
+  custom?: Record<string, unknown>;
+}
+```
+
+All calls return a `GenerationResult` with a `url` (Supabase Storage or provider URL), a `status` (`pending | running | completed | failed`), and a `metadata` block that includes credits consumed, the resolved model ID, and the raw provider response.
+
+## Routing & Providers
+
+The service automatically selects a backend route based on the model ID prefix:
+
+| Route | Triggered By | Backend |
+|-------|-------------|---------|
+| `fal-stream` | All `fal-ai/*` model IDs | Supabase Edge Function → fal.ai |
+| `gmi-cloud` | All `gmi/*` model IDs | Supabase Edge Function → GMI Cloud |
+| `gemini-text` | `google/gemini-*` or `openai/gpt-*` | `gemini-text-generation` Edge Function |
+| `groq-text` | `groq/*` or `llama-*` | `groq-chat` Edge Function |
+| `elevenlabs-tts` | `elevenlabs-tts` | `elevenlabs-tts` Edge Function |
+| `elevenlabs-sfx` | `elevenlabs-sfx` | `elevenlabs-sfx` Edge Function |
+| `elevenlabs-music` | `elevenlabs-music` | `elevenlabs-music` Edge Function |
+
+<Note>
+  **GMI Cloud is the default provider** for new projects. GMI Cloud models carry `provider: 'gmi-cloud'` in the catalog and offer the best price-to-quality ratio for most generation workflows. fal.ai models provide a broader selection of specialized and cutting-edge models.
+</Note>
+
+### Model Aliases
+
+Legacy and shorthand IDs are resolved to canonical catalog IDs before dispatch. Alias resolution lives in `src/lib/falModelNormalization.ts`:
+
+| Alias | Resolves To |
+|-------|-------------|
+| `flux-schnell` | `fal-ai/flux/schnell` |
+| `flux-dev` | `fal-ai/flux/dev` |
+| `flux-pro` | `fal-ai/flux-pro/v1.1-ultra` |
+| `kling-2-1` | `fal-ai/kling-video/o3/standard/text-to-video` |
+| `kling-pro-16` | `fal-ai/kling-video/o3/pro/text-to-video` |
+| `luma/dream-machine` | `fal-ai/kling-video/v3/pro/image-to-video` |
+| `hailuo` | `fal-ai/kling-video/o3/pro/image-to-video` |
+
+## Image Models
+
+WZRD Studio ships with an extensive image model catalog covering both **generation** (text-to-image) and **advanced** (image editing, upscaling, relighting, multi-angle) workflows.
+
+<CardGroup cols={2}>
+  <Card title="Default: Nano Banana 2" icon="bolt">
+    `fal-ai/nano-banana-2` — 4 credits, ~4s. The studio default for new projects. Fast text-to-image with aspect ratio and safety controls.
+  </Card>
+  <Card title="Premium: Flux 2 Max" icon="star">
+    `fal-ai/flux-2-max` — 10 credits, ~12s. Maximum quality FLUX 2 generation with 16:9 defaults.
+  </Card>
+  <Card title="GMI Default: Seedream 5.0" icon="seedling">
+    `gmi/seedream-5.0` — 3 credits, ~8s. High-fidelity image generation by BytePlus, routed through GMI Cloud.
+  </Card>
+  <Card title="Typography: Ideogram V3" icon="font">
+    `fal-ai/ideogram/v3` — 5 credits, ~8s. Best choice when the image must contain readable text or strong graphic design elements.
+  </Card>
+</CardGroup>
+
+<Accordion title="All image generation models">
+
+| Model | ID | Credits | Badge |
+|---|---|---|---|
+| FLUX Schnell | `fal-ai/flux/schnell` | 3 | Fast |
+| AuraFlow | `fal-ai/aura-flow` | 3 | Fast |
+| Nano Banana 2 | `fal-ai/nano-banana-2` | 4 | Fast |
+| Flux 2 Flash | `fal-ai/flux-2/flash` | 4 | Fast |
+| Z-Image Turbo | `fal-ai/z-image/turbo` | 4 | Fast |
+| FLUX Dev | `fal-ai/flux/dev` | 5 | Quality |
+| Qwen Image 2 | `fal-ai/qwen-image-2/text-to-image` | 5 | — |
+| Ideogram V3 | `fal-ai/ideogram/v3` | 5 | — |
+| Seedream 5 Lite | `fal-ai/seedream/v5/lite/text-to-image` | 5 | — |
+| Imagen 4 Fast | `fal-ai/imagen4/preview/fast` | 5 | Fast |
+| Flux 2 Turbo | `fal-ai/flux-2/turbo` | 5 | Fast |
+| Stable Diffusion 3.5 Large | `fal-ai/stable-diffusion-v35-large` | 4 | Quality |
+| OmniGen V1 | `fal-ai/omnigen-v1` | 5 | — |
+| Recraft V3 | `fal-ai/recraft-v3` | 5 | Quality |
+| Flux 2 | `fal-ai/flux-2` | 6 | Quality |
+| Qwen Image 2512 | `fal-ai/qwen-image-2512` | 6 | — |
+| HiDream I1 | `fal-ai/hidream-i1-full` | 6 | Premium |
+| Flux 2 Flex | `fal-ai/flux-2-flex` | 6 | — |
+| Nano Banana Pro | `fal-ai/nano-banana-pro` | 7 | Quality |
+| Qwen Image 2 Pro | `fal-ai/qwen-image-2/pro/text-to-image` | 7 | Premium |
+| FLUX Kontext Pro | `fal-ai/flux-pro/kontext/text-to-image` | 7 | Quality |
+| Imagen 4 | `fal-ai/imagen4/preview` | 7 | Quality |
+| Grok Imagine Image | `xai/grok-imagine-image` | 7 | — |
+| FLUX Pro Ultra | `fal-ai/flux-pro/v1.1-ultra` | 8 | Premium |
+| Flux 2 Pro | `fal-ai/flux-2-pro` | 8 | Premium |
+| GPT-Image 1.5 | `fal-ai/gpt-image-1.5` | 8 | Premium |
+| Flux 2 Max | `fal-ai/flux-2-max` | 10 | Premium |
+| Imagen 4 Ultra | `fal-ai/imagen4/preview/ultra` | 10 | Premium |
+
+</Accordion>
+
+<Accordion title="Image editing & advanced models">
+
+| Model | ID | Credits | Workflow |
+|---|---|---|---|
+| Nano Banana 2 Edit | `fal-ai/nano-banana-2/edit` | 5 | image-edit |
+| IC-Light V2 (Relighting) | `fal-ai/iclight-v2` | 5 | image-edit |
+| Creative Upscaler | `fal-ai/creative-upscaler` | 4 | image-edit |
+| Clarity Upscaler | `fal-ai/clarity-upscaler` | 4 | image-edit |
+| Qwen Image 2 Edit | `fal-ai/qwen-image-2/edit` | 6 | image-edit |
+| FLUX Dev Image-to-Image | `fal-ai/flux/dev/image-to-image` | 6 | image-to-image |
+| Seedream 5 Lite Edit | `fal-ai/seedream/v5/lite/edit` | 6 | image-edit |
+| Qwen Image Edit 2509 | `fal-ai/qwen-image-edit-2509` | 7 | image-edit |
+| Qwen Multiple Angles 2511 | `fal-ai/qwen-image-edit-2511-multiple-angles` | 7 | image-edit |
+| Nano Banana Pro Edit | `fal-ai/nano-banana-pro/edit` | 8 | image-edit |
+| Qwen Image 2 Pro Edit | `fal-ai/qwen-image-2/pro/edit` | 8 | image-edit |
+| FLUX Pro Ultra Redux | `fal-ai/flux-pro/v1.1-ultra/redux` | 9 | image-to-image |
+
+</Accordion>
+
+## Video Models
+
+Video models are divided into **generation** (text-to-video and image-to-video) and **advanced** (reference-to-video, video editing, video utilities). Most generation models support a `generate_audio` flag for automatic soundtrack creation.
+
+<CardGroup cols={2}>
+  <Card title="Default T2V: Kling O3 Standard" icon="play">
+    `fal-ai/kling-video/o3/standard/text-to-video` — 20 credits, ~45s. Balanced Omni text-to-video with audio support.
+  </Card>
+  <Card title="Default I2V: Kling O3 Standard" icon="image">
+    `fal-ai/kling-video/o3/standard/image-to-video` — 24 credits, ~60s. Default for animating a shot image.
+  </Card>
+  <Card title="Premium: Sora 2 Pro" icon="crown">
+    `fal-ai/sora-2/text-to-video/pro` — 50 credits, ~150s. OpenAI Sora 2 at maximum quality settings.
+  </Card>
+  <Card title="Fastest: LTX 2.3 Fast" icon="gauge-high">
+    `fal-ai/ltx-2.3/text-to-video/fast` — 16 credits, ~35s. Best choice when iteration speed matters more than fidelity.
+  </Card>
+</CardGroup>
+
+<Accordion title="All video generation models (fal.ai)">
+
+| Model | ID | Credits | Workflow |
+|---|---|---|---|
+| LTX Video | `fal-ai/ltx-video` | 16 | T2V |
+| LTX 2.3 Fast T2V | `fal-ai/ltx-2.3/text-to-video/fast` | 16 | T2V |
+| Seedance Lite T2V | `fal-ai/bytedance/seedance/v1/lite/text-to-video` | 18 | T2V |
+| Wan 2.1 T2V | `fal-ai/wan/v2.1/1.3b/text-to-video` | 18 | T2V |
+| Kling O3 Standard T2V | `fal-ai/kling-video/o3/standard/text-to-video` | 20 | T2V |
+| Kling O3 Standard I2V | `fal-ai/kling-video/o3/standard/image-to-video` | 24 | I2V |
+| LTX 2 19B T2V | `fal-ai/ltx-2-19b/text-to-video` | 24 | T2V |
+| MiniMax Video-01 Live | `fal-ai/minimax/video-01-live` | 25 | T2V |
+| Veo 3 Fast | `fal-ai/veo3/fast` | 25 | T2V |
+| Kling 2.5 Turbo Pro I2V | `fal-ai/kling-video/v2.5-turbo/pro/image-to-video` | 22 | I2V |
+| LTX 2.3 Pro T2V | `fal-ai/ltx-2.3/text-to-video` | 22 | T2V |
+| Seedance Pro T2V | `fal-ai/bytedance/seedance/v1/pro/text-to-video` | 30 | T2V |
+| Kling O3 Pro T2V | `fal-ai/kling-video/o3/pro/text-to-video` | 30 | T2V |
+| Kling 3.0 Pro I2V | `fal-ai/kling-video/v3/pro/image-to-video` | 30 | I2V |
+| Veo 3.1 Fast | `fal-ai/veo3.1/fast` | 30 | T2V |
+| Kling O3 Pro I2V | `fal-ai/kling-video/o3/pro/image-to-video` | 32 | I2V |
+| Kling 3.0 Pro T2V | `fal-ai/kling-video/v3/pro/text-to-video` | 32 | T2V |
+| Veo 3 | `fal-ai/veo3` | 35 | T2V |
+| Sora 2 | `fal-ai/sora-2/text-to-video` | 35 | T2V |
+| Veo 3.1 | `fal-ai/veo3.1` | 40 | T2V |
+| Veo 3.1 I2V | `fal-ai/veo3.1/image-to-video` | 42 | I2V |
+| Sora 2 Pro | `fal-ai/sora-2/text-to-video/pro` | 50 | T2V |
+
+</Accordion>
+
+<Accordion title="GMI Cloud video models">
+
+| Model | ID | Credits | Workflow |
+|---|---|---|---|
+| LTX-2 Fast I2V | `gmi/ltx-fast-i2v` | 5 | I2V |
+| PixVerse V5 T2V | `gmi/pixverse-v5-t2v` | 16 | T2V |
+| Wan 2.6 T2V | `gmi/wan2.6-t2v` | 18 | T2V |
+| Google Veo 3 Fast | `gmi/veo3-fast` | 20 | T2V |
+| Minimax Hailuo 2.3 | `gmi/minimax-hailuo-2.3` | 22 | T2V |
+| Kling I2V V2.1 Master | `gmi/kling-i2v-v2.1-master` | 24 | I2V |
+| Kling T2V V2.1 Master | `gmi/kling-t2v-v2.1-master` | 24 | T2V |
+| Kling V3 Omni | `gmi/kling-v3-omni` | 28 | T2V/I2V |
+| Luma Ray 2 | `gmi/luma-ray2` | 30 | T2V |
+| Seedance 2.0 Fast | `gmi/seedance-2.0-fast-t2v` | 20 | T2V |
+| Seedance 2.0 | `gmi/seedance-2.0-t2v` | 30 | T2V |
+| Google Veo 3 | `gmi/veo3` | 40 | T2V |
+
+</Accordion>
+
+<Accordion title="Video editing & utility models">
+
+| Model | ID | Credits | Workflow |
+|---|---|---|---|
+| FFmpeg Metadata | `fal-ai/ffmpeg-api/metadata` | 4 | analysis |
+| FFmpeg Extract Frame | `fal-ai/ffmpeg-api/extract-frame` | 6 | video-to-image |
+| Trim Video | `fal-ai/workflow-utilities/trim-video` | 8 | video-to-video |
+| Scale Video | `fal-ai/workflow-utilities/scale-video` | 8 | video-to-video |
+| FFmpeg Merge Videos | `fal-ai/ffmpeg-api/merge-videos` | 10 | video-to-video |
+| FFmpeg Merge Audio+Video | `fal-ai/ffmpeg-api/merge-audio-video` | 10 | video-to-video |
+| LTX Extend Video | `fal-ai/ltx-2-19b/distilled/extend-video` | 22 | video-edit |
+| Kling O3 Standard V2V Edit | `fal-ai/kling-video/o3/standard/video-to-video/edit` | 28 | video-edit |
+| **FFmpeg Compose** *(Director's Cut)* | `fal-ai/ffmpeg-api/compose` | **12** | video-compose |
+| Kling O3 Pro V2V Edit | `fal-ai/kling-video/o3/pro/video-to-video/edit` | 40 | video-edit |
+| Sora 2 Remix | `fal-ai/sora-2/video-to-video/remix` | 36 | video-edit |
+
+</Accordion>
+
+## Audio Models
+
+Audio models cover text-to-speech (TTS), voice cloning, voice design, music generation, sound effects (SFX), speech-to-text (STT), and audio utilities.
+
+<CardGroup cols={2}>
+  <Card title="Default TTS: ElevenLabs Turbo" icon="microphone">
+    `fal-ai/elevenlabs/tts/turbo-v2.5` — 4 credits. Premium natural-sounding TTS. Accepts a `voice_id` parameter for custom voices.
+  </Card>
+  <Card title="Music: Lyria 2" icon="music">
+    `fal-ai/lyria2` — 6 credits. Google DeepMind's music generation model. Supports `prompt` and `duration_seconds`.
+  </Card>
+  <Card title="SFX: CassetteAI" icon="drum">
+    `cassetteai/sound-effects-generator` — 3 credits. Prompt-driven sound effect synthesis.
+  </Card>
+  <Card title="STT: Whisper" icon="wave-square">
+    `fal-ai/whisper` — 2 credits. OpenAI Whisper for transcribing audio assets to text.
+  </Card>
+</CardGroup>
+
+<Accordion title="All audio models">
+
+| Model | ID | Credits | Category |
+|---|---|---|---|
+| Chatterbox | `fal-ai/chatterbox/text-to-speech` | 2 | TTS |
+| Qwen 3 TTS | `fal-ai/qwen-3-tts/text-to-speech/1.7b` | 2 | TTS |
+| MiniMax Turbo | `fal-ai/minimax/speech-02-turbo` | 2 | TTS |
+| MiniMax 2.8 Turbo | `fal-ai/minimax/speech-2.8-turbo` | 2 | TTS |
+| Whisper STT | `fal-ai/whisper` | 2 | STT |
+| MiniMax Speech HD | `fal-ai/minimax/speech-02-hd` | 3 | TTS |
+| Kling TTS | `fal-ai/kling-video/v1/tts` | 3 | TTS |
+| Index TTS 2 | `fal-ai/index-tts-2/text-to-speech` | 3 | TTS |
+| Lux TTS | `fal-ai/lux-tts` | 3 | TTS |
+| Dia TTS | `fal-ai/dia-tts` | 3 | TTS |
+| Orpheus TTS | `fal-ai/orpheus-tts` | 3 | TTS |
+| ElevenLabs STT | `fal-ai/elevenlabs/speech-to-text` | 3 | STT |
+| CassetteAI SFX | `cassetteai/sound-effects-generator` | 3 | SFX |
+| ElevenLabs TTS Turbo | `fal-ai/elevenlabs/tts/turbo-v2.5` | 4 | TTS |
+| VibeVoice 7B | `fal-ai/vibevoice/7b` | 4 | TTS |
+| xAI TTS | `xai/tts/v1` | 4 | TTS |
+| Pixverse SFX | `fal-ai/pixverse/sound-effects` | 4 | SFX |
+| Video SFX | `cassetteai/video-sound-effects-generator` | 4 | SFX |
+| Maya1 TTS | `fal-ai/maya` | 4 | TTS |
+| MiniMax Voice Clone | `fal-ai/minimax/voice-clone` | 5 | Voice Clone |
+| CassetteAI Music | `cassetteai/music-generator` | 5 | Music |
+| ACE-Step | `fal-ai/ace-step/audio-to-audio` | 5 | Music |
+| YuE: Lyrics to Song | `fal-ai/yue` | 5 | Music |
+| Lyria 2 | `fal-ai/lyria2` | 6 | Music |
+
+</Accordion>
+
+## Text Models
+
+Text models power storyline generation, shot descriptions, and any prompt-augmentation workflow. The default text model is **DeepSeek R1** (`gmi/deepseek-r1`, 4 credits), routed through GMI Cloud.
+
+| Model | ID | Credits | Provider |
+|---|---|---|---|
+| Gemini 3.1 Flash-Lite | `gmi/gemini-3.1-flash-lite` | 1 | GMI Cloud |
+| Llama 3.3 70B Versatile | `llama-3.3-70b-versatile` | 1 | Groq |
+| Llama 3.1 8B Instant | `llama-3.1-8b-instant` | 1 | Groq |
+| GLM 5.1 | `gmi/glm-5.1` | 2 | GMI Cloud |
+| OpenAI o4 Mini | `gmi/openai-o4-mini` | 3 | GMI Cloud |
+| DeepSeek R1 *(default)* | `gmi/deepseek-r1` | 4 | GMI Cloud |
+| Claude Opus 4.7 | `gmi/claude-opus-4.7` | 5 | GMI Cloud |
+| Gemini 2.5 Flash | `google/gemini-2.5-flash` | 1 | Gemini |
+| Gemini 2.5 Pro | `google/gemini-2.5-pro` | 5 | Gemini |
+| GPT-5 Mini | `openai/gpt-5-mini` | 3 | Gemini proxy |
+| GPT-5 | `openai/gpt-5` | 8 | Gemini proxy |
+
+## Querying the Model Catalog
+
+The full live catalog is available via a Supabase Edge Function endpoint. This is also the data source for the `list_models` MCP tool.
+
+```bash
+GET https://<project>.supabase.co/functions/v1/model-catalog
+Authorization: Bearer <supabase-jwt>   # optional — enables user-tier sorting
+```
+
+**Response:**
+
+```json
+{
+  "models": [
+    {
+      "id": "gmi/seedream-5.0-lite",
+      "name": "Seedream 5 Lite",
+      "credits": 2,
+      "media_type": "image",
+      "provider": "gmi-cloud"
+    }
+  ]
+}
+```
+
+<Info>
+  The `list_models` MCP tool wraps this endpoint. Call it from any MCP-compatible agent to enumerate available models with their credit costs before constructing a generation request.
+</Info>
+
+## Feature Flags
+
+Two environment variables control generation streaming behavior:
+
+| Flag | Effect |
+|------|--------|
+| `VITE_ENABLE_SHOT_STREAM` | Enables SSE (Server-Sent Events) streaming for shot generation. When `true`, progress events are pushed to the client in real time rather than polling. |
+| `VITE_ENABLE_STREAM_TELEMETRY` | Enables telemetry collection for streaming generation events. Used to track latency and error rates in production. |
+
+<Tip>
+  Enable `VITE_ENABLE_SHOT_STREAM=true` in development to see real-time generation progress in the Timeline shot panel. The progress callback receives `{ percent, message }` objects at key generation milestones (queued → generating → complete).
+</Tip>
+
+## Usage Examples
+
+### Image Generation
+
+```typescript
+import { unifiedGenerationService } from '@/services/unifiedGenerationService';
+
+const result = await unifiedGenerationService.generateImage(
+  'A cinematic wide shot of a futuristic city at sunset',
+  {
+    model: 'fal-ai/nano-banana-2',
+    parameters: { aspect_ratio: '16:9', num_images: 1 },
+    projectId: 'my-project-id',
+    source: 'studio',
+    autoStore: true,
+  }
+);
+
+console.log(result.url);    // Supabase Storage URL
+console.log(result.status); // 'completed'
+```
+
+### Video Generation (with progress)
+
+```typescript
+const result = await unifiedGenerationService.generate(
+  {
+    model: 'fal-ai/kling-video/o3/standard/text-to-video',
+    prompt: 'A drone flyover of a tropical island, golden hour lighting',
+    parameters: { duration: '5', aspect_ratio: '16:9', generate_audio: true },
+    metadata: { source: 'timeline', projectId: 'my-project-id' },
+  },
+  (progress) => {
+    console.log(`${progress.percent}% — ${progress.message}`);
+  }
+);
+
+console.log(result.metadata.credits);         // 20
+console.log(result.metadata.durationSeconds); // video duration
+```
+
+### Image-to-Video
+
+```typescript
+const result = await unifiedGenerationService.generate({
+  model: 'fal-ai/kling-video/v3/pro/image-to-video',
+  prompt: 'The camera slowly zooms in as leaves blow in the wind',
+  referenceAssets: [
+    { url: 'https://storage.example.com/scene.png', type: 'image', role: 'input_image' }
+  ],
+  parameters: { duration_seconds: 5, fps: 24, generate_audio: true },
+  metadata: { source: 'editor', projectId: 'my-project-id' },
+});
+```
+
+### Audio (TTS)
+
+```typescript
+const ttsResult = await unifiedGenerationService.generateAudio(
+  'Welcome to WZRD Studio, your AI filmmaking platform.',
+  {
+    model: 'fal-ai/elevenlabs/tts/turbo-v2.5',
+    parameters: { voiceId: 'JBFqnCBsd6RMkjVDRZzb' },
+    source: 'project-setup',
+  }
+);
+```
+
+### Text (Storyline Generation)
+
+```typescript
+const result = await unifiedGenerationService.generateText(
+  'Write a 3-sentence storyline for a sci-fi short film about time travel.',
+  {
+    model: 'gmi/deepseek-r1',
+    source: 'project-setup',
+  }
+);
+
+// Generated text is in raw metadata
+const text = (result.metadata.raw as { text: string }).text;
+```

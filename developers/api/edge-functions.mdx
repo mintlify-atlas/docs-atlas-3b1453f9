@@ -1,0 +1,494 @@
+---
+title: "Supabase Edge Functions: WZRD Backend API Reference"
+sidebarTitle: "Edge Functions"
+description: "Complete reference for WZRD Studio's Supabase Edge Functions covering auth, billing, assets, AI proxy, social publishing, and project management."
+---
+
+WZRD Studio's backend is built entirely on **Supabase Edge Functions** — Deno-based serverless functions deployed at the edge and called directly from the Electron desktop app. Each function handles a focused responsibility: authentication, billing, AI model proxying, asset management, or social publishing. All functions share a common authentication pattern and CORS configuration, and they are addressable at `{VITE_SUPABASE_URL}/functions/v1/{function-name}`.
+
+<Note>
+  All requests require `Authorization: Bearer <supabase-jwt>` unless noted otherwise. Functions return `Content-Type: application/json` for standard responses and `text/event-stream` for SSE endpoints.
+</Note>
+
+---
+
+## Authentication
+
+<Accordion title="POST /functions/v1/wallet-auth — Wallet Signature → Supabase JWT">
+  The only **public** edge function (no JWT required). Verifies an EIP-191 wallet signature using `viem`, then upserts the user in Supabase Auth and returns a full session.
+
+  This is the primary sign-in path for WZRD Studio — users sign a timestamped message with their Web3 wallet, and the function bridges that proof into a standard Supabase session.
+
+  **Request body:**
+
+  <ParamField body="walletAddress" type="string" required>
+    The 0x-prefixed EVM wallet address (case-insensitive; stored as lowercase).
+  </ParamField>
+  <ParamField body="message" type="string" required>
+    The raw message that was signed. Must contain `walletAddress` and `timestamp` as substrings to prevent replay attacks.
+  </ParamField>
+  <ParamField body="signature" type="string" required>
+    EIP-191 hex signature produced by the wallet.
+  </ParamField>
+  <ParamField body="timestamp" type="integer" required>
+    Unix timestamp (milliseconds) when the message was signed. Must be within 10 minutes of server time (2-minute future tolerance for clock skew).
+  </ParamField>
+
+  **Successful response:**
+  ```json
+  {
+    "session": { "access_token": "...", "refresh_token": "...", "expires_in": 3600 },
+    "user": { "id": "uuid", "email": "0xabc...@wallet.local" },
+    "bootstrap": { ... }
+  }
+  ```
+
+  **Bootstrap side-effects:**
+  - Creates a user profile row if one doesn't exist
+  - Ensures a `wallet_users` link record exists
+  - Provisions a credit account with a one-time **100-credit welcome grant** via `ensure_credit_account`
+
+  <Warning>
+    The bootstrap step is idempotent but **must not fail**. If it does, the function returns HTTP 500 — a half-initialized user session is not returned to the client.
+  </Warning>
+</Accordion>
+
+<Accordion title="GET /functions/v1/get-thirdweb-config — Thirdweb Client Config">
+  Returns the Thirdweb `clientId` and any additional configuration needed for the Thirdweb Connect SDK. Called by the app during initialization before the auth flow begins.
+
+  **Response:**
+  ```json
+  {
+    "clientId": "..."
+  }
+  ```
+</Accordion>
+
+<Accordion title="GET /functions/v1/realtime-client-secret — OpenAI Realtime API Key">
+  Issues an ephemeral, short-lived OpenAI Realtime API key for use in the AI Director voice interface. The key is scoped to real-time sessions and expires automatically.
+
+  **Response:**
+  ```json
+  {
+    "client_secret": "...",
+    "expires_at": 1700000000
+  }
+  ```
+
+  <Warning>
+    Never expose this key to users or log it. The response contains a sensitive credential that grants real-time API access.
+  </Warning>
+</Accordion>
+
+---
+
+## Billing
+
+<Accordion title="GET /functions/v1/billing-catalog — Plans and Credit Packs">
+  Returns the full billing catalog: subscription plans, credit packs, the current user's active subscription, and their credit wallet balance. Falls back to hardcoded defaults if the database tables are unavailable.
+
+  **Plans (fallback defaults):**
+
+  | `plan_code` | Name | Monthly | Yearly | Credits/mo |
+  |---|---|---|---|---|
+  | `free` | Free | $0 | — | 0 (one-time 100 welcome) |
+  | `pro` | Pro | $49 | $468 | 2,000 |
+  | `business` | Business | $149 | $1,428 | 10,000 |
+
+  **Credit Packs (fallback defaults):**
+
+  | `pack_code` | Credits | Price |
+  |---|---|---|
+  | `pack_500` | 500 | $9.99 |
+  | `pack_2000` | 2,000 | $29.99 |
+  | `pack_5000` | 5,000 | $59.99 |
+
+  **Response:**
+  ```json
+  {
+    "success": true,
+    "billing_mode": "live",
+    "checkout_available": true,
+    "plans": [ ... ],
+    "credit_packs": [ ... ],
+    "subscription": {
+      "plan_code": "pro",
+      "status": "active",
+      "cancel_at_period_end": false,
+      "current_period_start": "2024-01-01T00:00:00Z",
+      "current_period_end": "2024-02-01T00:00:00Z"
+    },
+    "wallet": { ... },
+    "plan": { ... }
+  }
+  ```
+</Accordion>
+
+<Accordion title="POST /functions/v1/billing-checkout — Create Stripe Checkout Session">
+  Creates a Stripe Checkout session for either a credit pack purchase (one-time payment) or a subscription upgrade.
+
+  **Request body:**
+
+  <ParamField body="checkout_mode" type="string" required>
+    Either `"pack"` (one-time credit purchase) or `"subscription"`.
+  </ParamField>
+  <ParamField body="pack_code" type="string">
+    Required when `checkout_mode` is `"pack"`. Must match an active `billing_credit_packs` row (e.g., `"pack_500"`).
+  </ParamField>
+  <ParamField body="plan_code" type="string">
+    Required when `checkout_mode` is `"subscription"`. Must match an active `billing_plans` row (e.g., `"pro"`).
+  </ParamField>
+  <ParamField body="interval" type="string">
+    For subscriptions: `"month"` (default) or `"year"`.
+  </ParamField>
+  <ParamField body="success_url" type="string">
+    Redirect URL after successful payment. Defaults to `{origin}/settings/billing?checkout=success`.
+  </ParamField>
+  <ParamField body="cancel_url" type="string">
+    Redirect URL if the user cancels. Defaults to `{origin}/settings/billing?checkout=cancel`.
+  </ParamField>
+
+  **Response:**
+  ```json
+  {
+    "success": true,
+    "billing_mode": "live",
+    "checkout_mode": "pack",
+    "session_id": "cs_...",
+    "checkout_url": "https://checkout.stripe.com/pay/cs_...",
+    "status": "created"
+  }
+  ```
+
+  A `billing_checkout_sessions` row is inserted for audit purposes.
+</Accordion>
+
+<Accordion title="POST /functions/v1/billing-portal — Customer Billing Portal">
+  Creates a Stripe Customer Portal session so the user can manage their subscription, update payment methods, and view invoices.
+
+  **Response:**
+  ```json
+  {
+    "url": "https://billing.stripe.com/session/..."
+  }
+  ```
+</Accordion>
+
+<Accordion title="POST /functions/v1/admin-add-credits — Admin Credit Adjustment">
+  Adds or removes credits from a user's wallet. Restricted to users with an admin role. Used for manual top-ups, refunds, and promotions.
+
+  **Request body:**
+
+  <ParamField body="user_id" type="string" required>
+    Target user UUID.
+  </ParamField>
+  <ParamField body="amount" type="number" required>
+    Credits to add (positive) or deduct (negative).
+  </ParamField>
+  <ParamField body="reason" type="string">
+    Human-readable reason for the adjustment (stored in the credit ledger).
+  </ParamField>
+</Accordion>
+
+---
+
+## AI Generation (Proxy)
+
+<Accordion title="POST /functions/v1/fal — fal.ai Model Proxy (Queue Mode)">
+  Submits a generation job to fal.ai in `queue` mode and returns immediately with a `requestId` and initial `status`. Use this for fire-and-forget submissions where the client polls for results separately.
+
+  **Request body:**
+
+  <ParamField body="modelId" type="string" required>
+    fal.ai model ID (e.g., `fal-ai/flux/schnell`). The function prepends the `fal.run/v1/` prefix automatically.
+  </ParamField>
+  <ParamField body="input" type="object" required>
+    Model-specific input payload. All fields are forwarded verbatim to fal.ai with `mode: "queue"` added.
+  </ParamField>
+
+  **Response:**
+  ```json
+  {
+    "requestId": "fal-request-id",
+    "status": "IN_QUEUE",
+    "result": null
+  }
+  ```
+
+  <Note>
+    For streaming results with automatic polling, use `/functions/v1/fal-stream` instead. The `fal` function is a thin proxy for advanced use cases.
+  </Note>
+</Accordion>
+
+<Accordion title="POST /functions/v1/fal-stream — fal.ai SSE Streaming Proxy">
+  The primary AI generation proxy used by the Unified Generation Service. Submits the job to fal.ai, polls for status, and streams progress as SSE events. Handles automatic model fallback if the primary model fails.
+
+  **Request body:**
+
+  <ParamField body="modelId" type="string" required>
+    fal.ai model ID. The function resolves aliases and applies model-specific input normalization.
+  </ParamField>
+  <ParamField body="inputs" type="object" required>
+    Model inputs. Fields are normalized via `mergeFalModelInputs` before submission.
+  </ParamField>
+  <ParamField body="media_type" type="string">
+    Hint for credit billing and fallback resolution: `"image"`, `"video"`, `"audio"`, `"json"`, or `"utility"`. Inferred from `modelId` when omitted.
+  </ParamField>
+  <ParamField body="request_id" type="string">
+    Client-supplied idempotency key for credit deduplication.
+  </ParamField>
+
+  **SSE Event Types:**
+
+  | Event `type` | Description |
+  |---|---|
+  | `meta` | Resolved model, fallback status, media type |
+  | `progress` | fal.ai queue status (`IN_QUEUE` → `IN_PROGRESS`), progress percent (5–95), logs |
+  | `done` | Final result object, resolved model ID |
+  | `fallback` | Primary model failed; retrying with fallback model |
+  | `error` | Terminal error with reason |
+
+  **Credit billing:** Credits are reserved before submission. Actual cost committed on `done`; hold released on `error`.
+</Accordion>
+
+<Accordion title="POST /functions/v1/fal-proxy — fal.ai Request Proxy">
+  Low-level passthrough proxy for fal.ai requests. Forwards the request body directly to fal.ai without modification. Used for specialized integrations that need raw fal.ai API access.
+</Accordion>
+
+<Accordion title="POST /functions/v1/gemini-image-generation — Gemini Image Generation">
+  Generates images using Google Gemini's image generation capabilities. Accepts a text prompt and optional generation parameters.
+
+  **Request body:** `{ prompt, model?, parameters? }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/gemini-video-generation — Gemini Video Generation">
+  Generates videos using Google Gemini's video generation capabilities.
+
+  **Request body:** `{ prompt, model?, parameters? }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/gemini-text-generation — Gemini Text Generation (SSE)">
+  Generates text using Google Gemini or OpenAI GPT models. Streams the response as SSE with OpenAI-compatible `data:` chunks. Used by the Unified Generation Service for the `gemini-text` route.
+
+  **Request body:** `{ prompt, model?, stream? }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/gemini-image-analysis — Gemini Image Analysis">
+  Analyzes an image using Gemini's multimodal capabilities. Returns structured descriptions, tags, and scene information.
+
+  **Request body:** `{ image_url, prompt? }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/elevenlabs-tts — ElevenLabs Text-to-Speech">
+  Converts text to speech using ElevenLabs. Returns raw audio bytes (`audio/mpeg`).
+
+  **Request body:**
+
+  <ParamField body="text" type="string" required>
+    The text to synthesize.
+  </ParamField>
+  <ParamField body="voiceId" type="string">
+    ElevenLabs voice ID. Defaults to `JBFqnCBsd6RMkjVDRZzb`.
+  </ParamField>
+  <ParamField body="modelId" type="string">
+    ElevenLabs TTS model ID.
+  </ParamField>
+
+  **Response:** Binary audio stream (`Content-Type: audio/mpeg`).
+</Accordion>
+
+<Accordion title="POST /functions/v1/elevenlabs-sfx — ElevenLabs Sound Effects">
+  Generates a sound effect from a text description.
+
+  **Request body:**
+
+  <ParamField body="prompt" type="string" required>
+    Description of the sound to generate.
+  </ParamField>
+  <ParamField body="duration" type="number">
+    Desired duration in seconds (default: 5).
+  </ParamField>
+
+  **Response:** Binary audio stream.
+</Accordion>
+
+<Accordion title="POST /functions/v1/elevenlabs-music — ElevenLabs Music Generation">
+  Generates a music track from a text prompt.
+
+  **Request body:**
+
+  <ParamField body="prompt" type="string" required>
+    Description of the music to generate.
+  </ParamField>
+  <ParamField body="duration" type="number">
+    Duration in seconds (default: 30).
+  </ParamField>
+
+  **Response:** Binary audio stream.
+</Accordion>
+
+<Accordion title="GET /functions/v1/elevenlabs-voices — ElevenLabs Voice List">
+  Returns the list of available ElevenLabs voices for use in TTS.
+
+  **Response:** `{ voices: [{ voice_id, name, preview_url, ... }] }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/groq-chat — Groq Chat Completion">
+  Calls Groq's `/openai/v1/chat/completions` endpoint. Used for fast text generation in project setup (storyline, shot ideas, scene breakdowns).
+
+  **Request body:**
+
+  <ParamField body="prompt" type="string" required>
+    User prompt text.
+  </ParamField>
+  <ParamField body="model" type="string">
+    Groq model ID (default: `llama-3.3-70b-versatile`).
+  </ParamField>
+  <ParamField body="temperature" type="number">
+    Sampling temperature (default: 0.7).
+  </ParamField>
+  <ParamField body="maxTokens" type="integer">
+    Maximum tokens to generate (default: 1024).
+  </ParamField>
+  <ParamField body="systemPrompt" type="string">
+    System prompt to prepend.
+  </ParamField>
+
+  **Response:** OpenAI-compatible completion object.
+</Accordion>
+
+<Accordion title="POST /functions/v1/groq-stream — Groq Chat Completion (SSE)">
+  Streaming variant of `groq-chat`. Emits OpenAI-compatible `data:` SSE chunks.
+
+  **Request body:** Same as `groq-chat` with `stream: true` implied.
+</Accordion>
+
+---
+
+## Assets & Projects
+
+<Accordion title="POST /functions/v1/asset-upload — Upload Media to Project">
+  Uploads a media file to the project's Supabase Storage bucket and creates an asset record. Supports images, videos, and audio.
+
+  **Request body:**
+  - `project_id` (required) — target project UUID
+  - `file` — base64-encoded file data or a URL to fetch and re-upload
+  - `asset_type` — `"image"` | `"video"` | `"audio"`
+  - `metadata` — optional custom key-value metadata
+
+  **Response:** `{ asset_id, public_url, storage_path }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/asset-processor — Process / Transcode Assets">
+  Triggers server-side processing or transcoding for an uploaded asset. Operations include thumbnail generation, video frame extraction, and format conversion.
+
+  **Request body:** `{ asset_id, operations: string[] }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/create-project — Create a New Project">
+  Creates a new project row with default scenes and metadata. Returns the full project object.
+
+  **Request body:**
+  - `title` (required) — project title
+  - `description` — optional project description
+  - `template_id` — optional starting template
+
+  **Response:** `{ project: { id, title, ... } }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/upload — Generic File Upload">
+  Generic file upload endpoint. Accepts multipart or base64 payloads and stores the file in the specified bucket. Returns a `public_url`.
+</Accordion>
+
+<Accordion title="POST /functions/v1/download — Retrieve Asset">
+  Generates a signed download URL for a private storage asset, or proxies the asset bytes directly.
+
+  **Request body:** `{ bucket, path, expires_in? }`
+
+  **Response:** `{ url }` or binary stream.
+</Accordion>
+
+---
+
+## Collaboration & Sharing
+
+<Accordion title="POST /functions/v1/invite-collaborator">
+  Sends a collaboration invite to another user by email or user ID, granting them access to a specific project.
+
+  **Request body:**
+  - `project_id` (required)
+  - `invitee_email` or `invitee_user_id`
+  - `role` — `"viewer"` | `"editor"` | `"admin"`
+</Accordion>
+
+<Accordion title="POST /functions/v1/create-share-link">
+  Generates a shareable link for a project with configurable access level and optional expiry.
+
+  **Request body:**
+  - `project_id` (required)
+  - `access_level` — `"view"` | `"comment"`
+  - `expires_at` — ISO 8601 expiry timestamp (optional)
+
+  **Response:** `{ share_link, token, expires_at }`
+</Accordion>
+
+<Accordion title="GET /functions/v1/access-share-link">
+  Validates a share link token and returns the project metadata the token grants access to. Called by recipients following a shared link.
+
+  **Query params:** `?token=<share-token>`
+
+  **Response:** `{ project_id, access_level, project: { ... } }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/revoke-share">
+  Revokes a share link or collaborator access for a project.
+
+  **Request body:** `{ project_id, token? (for links) | user_id? (for collaborators) }`
+</Accordion>
+
+---
+
+## Social (Postz)
+
+The Postz integration lets users publish project exports to social media platforms directly from WZRD Studio.
+
+<Accordion title="POST /functions/v1/postz-channels">
+  Returns the list of social media channels connected to the user's account, and the platforms available for OAuth connection.
+
+  **Response:**
+  ```json
+  {
+    "channels": [
+      {
+        "id": "channel-uuid",
+        "provider": "instagram",
+        "display_name": "@myaccount",
+        "status": "connected"
+      }
+    ],
+    "available_platforms": ["instagram", "tiktok", "youtube", "twitter"]
+  }
+  ```
+</Accordion>
+
+<Accordion title="POST /functions/v1/postz-oauth">
+  Initiates the OAuth flow for a new social media connection. Returns an authorization URL that the desktop app opens in the system browser. After the user authorizes, the platform redirects to `wzrd://postz/connected` — see the [Deep Links reference](/developers/api/deep-links) for how this callback is handled.
+
+  **Request body:**
+  - `provider` (required) — platform to connect (e.g., `"instagram"`)
+  - `redirect_uri` — typically the deep link `wzrd://postz/connected`
+
+  **Response:** `{ auth_url, state_id }`
+</Accordion>
+
+<Accordion title="POST /functions/v1/postz-posts">
+  Publishes a post to one or more connected channels.
+
+  **Request body:**
+  - `channel_ids` (required) — array of channel UUIDs to post to
+  - `asset_url` (required) — URL of the video or image to publish
+  - `caption` — post caption text
+  - `scheduled_at` — ISO 8601 timestamp to schedule the post (publishes immediately if omitted)
+
+  **Response:** `{ post_id, status: "published" | "scheduled" }`
+</Accordion>

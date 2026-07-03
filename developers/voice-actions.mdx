@@ -1,0 +1,389 @@
+---
+title: "Voice Actions: Control WZRD Studio by Voice"
+sidebarTitle: "Voice Actions"
+description: "WZRD Studio's voice layer uses OpenAI Realtime API to let you navigate, generate, and edit using spoken commands. Learn how to register and use voice actions."
+---
+
+WZRD Studio has a built-in voice control layer powered by the OpenAI Realtime API. Every authenticated page in the app — from the project timeline to the Kanvas generative canvas to the QCut editor — can respond to spoken commands. Pages register their own voice actions at mount time, and a global set of navigation actions is always available. The system is designed so developers can expose new actions on any page with a single hook call.
+
+## Architecture Overview
+
+<CardGroup cols={2}>
+  <Card title="VoiceAgentProvider" icon="microphone">
+    Wraps the authenticated app shell. Creates the `VoiceActionRegistry`, registers global navigation actions, boots the Realtime session, and renders the `VoiceActionButton` UI element.
+  </Card>
+  <Card title="VoiceActionRegistry" icon="table-list">
+    A Map of `VoiceActionName` → `VoiceActionRegistration[]`. Registrations are stacked — the most recently registered handler wins. Deregisters automatically when the registering component unmounts.
+  </Card>
+  <Card title="useWzrdRealtimeSession" icon="wave-square">
+    Manages the WebRTC transport to the OpenAI Realtime API. Handles push-to-talk, tool-call dispatch, status transitions, and error normalization.
+  </Card>
+  <Card title="VoiceSelectionContext" icon="cursor">
+    Provides `scrollVoiceTargetIntoView` and `useVoiceSelection` for highlighting and selecting UI elements by voice command — used by the timeline, shot grid, and editor panels.
+  </Card>
+</CardGroup>
+
+## VoiceAgentProvider
+
+`VoiceAgentProvider` is the root context provider for the entire voice system. It lives inside the authenticated router shell and wraps `VoiceSelectionProvider`:
+
+```typescript
+// src/voice/VoiceAgentProvider.tsx (simplified)
+export function VoiceAgentProvider({ children }: { children: React.ReactNode }) {
+  const registry = useMemo(() => createVoiceActionRegistry(), []);
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { isAuthenticated } = useAuth();
+
+  // Register global navigation actions on every route change
+  const globalActions = useMemo(
+    () =>
+      createGlobalVoiceActions({
+        navigate,
+        getLocationPath: () => `${location.pathname}${location.search}`,
+        getCurrentProjectId: () => getProjectIdFromPath(location.pathname),
+        getAvailableActionNames: () =>
+          Array.from(new Set(registry.list().map((r) => r.name))).sort(),
+      }),
+    [location.pathname, location.search, navigate, registry],
+  );
+
+  // Boot the OpenAI Realtime session
+  const voiceSession = useWzrdRealtimeSession({ registry });
+
+  // Only show the mic button on authenticated pages (not / or /login)
+  const showVoiceControl = shouldShowVoiceControl(location.pathname, isAuthenticated);
+
+  return (
+    <VoiceAgentContext.Provider value={registry}>
+      <VoiceSelectionProvider>
+        {children}
+        {showVoiceControl ? (
+          <VoiceActionButton
+            status={voiceSession.status}
+            onPressStart={voiceSession.pushToTalkStart}
+            onPressEnd={voiceSession.pushToTalkStop}
+            onDisconnect={voiceSession.disconnect}
+          />
+        ) : null}
+      </VoiceSelectionProvider>
+    </VoiceAgentContext.Provider>
+  );
+}
+```
+
+The `VoiceActionButton` is rendered on all authenticated routes **except** `/` and `/login`.
+
+## VoiceActionRegistry
+
+The registry is created once with `createVoiceActionRegistry()` and exposed through context. It supports stacked registrations — if two components register the same action name, the most recently registered handler is called. When the component unmounts, its registration is automatically removed and the previous handler takes over.
+
+```typescript
+interface VoiceActionRegistry {
+  register: <Input = unknown>(registration: VoiceActionRegistration<Input>) => () => void;
+  execute: (
+    name: VoiceActionName,
+    input?: unknown,
+    context?: VoiceActionExecutionContext,
+  ) => Promise<VoiceActionResult>;
+  list: () => VoiceActionRegistration[];
+  clear: () => void;
+}
+```
+
+## Action Types
+
+### VoiceActionName
+
+Every registerable action name is a member of the `VoiceActionName` union type. This gives full TypeScript autocomplete and prevents typos at the registration site.
+
+```typescript
+export type VoiceActionName =
+  | 'get_app_context'
+  | 'navigate_app'
+  | 'start_new_project'
+  | 'timeline_select_shot'
+  | 'timeline_generate_shot_image'
+  | 'timeline_generate_all_images'
+  | 'timeline_start_directors_cut'
+  | 'kanvas_set_studio'
+  | 'kanvas_generate'
+  | 'editor_import_media_by_url'
+  | 'editor_add_clip'
+  | 'editor_split_element'
+  | 'editor_delete_element'
+  | 'editor_add_title'
+  | 'editor_export'
+  // ... and many more (see src/voice/actions/registry.ts)
+```
+
+### VoiceActionResult
+
+Every handler must return a `VoiceActionResult`, which is a discriminated union:
+
+```typescript
+type VoiceActionResult =
+  | {
+      ok: true;
+      status: 'completed';
+      message: string;   // Spoken back to the user
+      data?: unknown;    // Optional structured payload
+    }
+  | {
+      ok: false;
+      status: 'needs_confirmation' | 'unavailable' | 'invalid_input' | 'failed';
+      message: string;
+      data?: unknown;
+      confirmation?: VoiceActionConfirmation;
+      errorCode?: string;
+    };
+```
+
+### VoiceActionRisk
+
+Actions that modify state can declare a risk level to require user confirmation before execution:
+
+```typescript
+type VoiceActionRisk = 'navigation' | 'write' | 'generation' | 'sensitive';
+```
+
+When a `confirmation` is declared in the registration, the registry returns `{ status: 'needs_confirmation' }` on the first call. The agent asks the user to confirm, then re-calls with `context.confirmed = true`.
+
+## Registering Voice Actions
+
+### useRegisterVoiceActions
+
+Pages register their local actions with the `useRegisterVoiceActions` hook. Registrations are automatically cleaned up when the component unmounts.
+
+```typescript
+export function useRegisterVoiceActions(registrations: VoiceActionRegistration[]) {
+  const registry = useContext(VoiceAgentContext);
+
+  useEffect(() => {
+    if (!registry) return;
+    const unregister = registrations.map((registration) => registry.register(registration));
+    return () => {
+      unregister.forEach((fn) => fn());
+    };
+  }, [registry, registrations]);
+}
+```
+
+### VoiceActionRegistration
+
+```typescript
+interface VoiceActionRegistration<Input = unknown> {
+  name: VoiceActionName;       // Must be a known VoiceActionName
+  scope: string;               // Descriptive string, e.g. 'timeline-page'
+  description?: string;        // Shown in the agent's tool definition
+  confirmation?: {
+    risk: VoiceActionRisk;
+    message: string;           // Spoken to user: "Are you sure you want to…?"
+  };
+  handler: VoiceActionHandler<Input>;
+}
+```
+
+### Example: Registering a Custom Voice Action
+
+```typescript
+import { useRegisterVoiceActions } from '@/voice/VoiceAgentProvider';
+
+function StoryboardPage() {
+  const { triggerGeneration } = useGeneration();
+
+  useRegisterVoiceActions([
+    {
+      name: 'generate-storyboard',
+      scope: 'storyboard-page',
+      description: 'Generate all storyboard images for the current project',
+      confirmation: {
+        risk: 'generation',
+        message: 'This will use credits to generate all storyboard images. Continue?',
+      },
+      handler: async (input, context) => {
+        if (!context.currentProjectId) {
+          return {
+            ok: false,
+            status: 'invalid_input',
+            message: 'No project is open. Please open a project first.',
+          };
+        }
+        await triggerGeneration(context.currentProjectId);
+        return {
+          ok: true,
+          status: 'completed',
+          message: 'Storyboard generation started.',
+        };
+      },
+    },
+  ]);
+
+  // ...
+}
+```
+
+### Accessing the Registry Directly
+
+Use `useVoiceActionRegistry()` to read or execute actions imperatively from child components:
+
+```typescript
+import { useVoiceActionRegistry } from '@/voice/VoiceAgentProvider';
+
+function DebugPanel() {
+  const registry = useVoiceActionRegistry();
+
+  const listAll = () => {
+    const names = registry.list().map((r) => r.name);
+    console.log('Registered actions:', names);
+  };
+
+  return <button onClick={listAll}>List voice actions</button>;
+}
+```
+
+## Global Navigation Actions
+
+`createGlobalVoiceActions` produces the baseline set of actions that are always available regardless of which page is open. These are re-registered on every route change so they always reflect the current location and project context.
+
+| Action name | What it does |
+|---|---|
+| `get_app_context` | Returns current `locationPath`, `currentProjectId`, and `availableActions` array |
+| `navigate_app` | Navigates to any `VoiceNavigationTarget` — home, kanvas, project timeline, editor, Directors' Cut, etc. |
+| `start_new_project` | Opens the project setup page |
+| `open_project_view` | Opens a specific view within the current project (timeline, editor, studio, observability) |
+| `open_ip_vault` | Opens the IP Vault page |
+| `character_open` | Opens Kanvas with character-creation studio |
+| `kanvas_set_studio` | Opens Kanvas with a specific studio mode and optional text prompt |
+
+Navigation targets include all major app surfaces:
+
+```typescript
+type VoiceNavigationTarget =
+  | 'home' | 'project_setup' | 'assets' | 'ip_vault'
+  | 'kanvas' | 'kanvas_image' | 'kanvas_video' | 'kanvas_edit'
+  | 'kanvas_cinema' | 'kanvas_lipsync' | 'kanvas_character_creation'
+  | 'project_studio' | 'project_timeline' | 'project_editor'
+  | 'project_directors_cut' | 'project_observability'
+  | 'settings_billing' | 'learning_studio';
+```
+
+## Realtime Session
+
+`useWzrdRealtimeSession` manages the full lifecycle of the OpenAI Realtime WebRTC session. It exposes push-to-talk controls and a typed `VoiceSessionStatus`.
+
+```typescript
+type VoiceSessionStatus =
+  | 'idle'        // No session active
+  | 'connecting'  // WebRTC handshake in progress
+  | 'connected'   // Ready, microphone off
+  | 'listening'   // Microphone active, capturing speech
+  | 'thinking'    // Model processing input / executing tool calls
+  | 'speaking'    // Model audio playing back
+  | 'confirming'  // Awaiting user confirmation for a risky action
+  | 'error';      // Session error — see errorMessage
+```
+
+### Push-to-Talk API
+
+```typescript
+const {
+  status,
+  errorMessage,
+  pushToTalkStart,  // Call on mic button press
+  pushToTalkStop,   // Call on mic button release
+  disconnect,       // Tear down the WebRTC session
+} = useWzrdRealtimeSession({ registry });
+```
+
+`pushToTalkStart` lazily connects the session on the first press. Subsequent presses interrupt any in-progress model response before capturing new input. `pushToTalkStop` commits the audio buffer and sends `response.create` to the model.
+
+### Session Configuration
+
+The session is initialized with the app's voice instructions, all registered tool definitions, and `turn_detection: null` (push-to-talk mode). Transcription uses `gpt-4o-mini-transcribe`.
+
+```typescript
+sessionConfig: {
+  modalities: ['text', 'audio'],
+  voice: 'marin',   // VITE_WZRD_REALTIME_VOICE
+  instructions: getVoiceInstructions(),
+  tools: getVoiceToolDefinitions(registry),
+  tool_choice: 'auto',
+  turn_detection: null,
+  input_audio_transcription: { model: 'gpt-4o-mini-transcribe' },
+}
+```
+
+### Authentication & API Key
+
+The session key is fetched through the `realtime-client-secret` Supabase Edge Function, keeping your OpenAI key off the client:
+
+```typescript
+// Internally called by useWzrdRealtimeSession
+const sessionInfo = await fetchRealtimeClientSecret();
+// → { clientSecret: '...', model: 'gpt-4o-realtime-preview' }
+```
+
+<Note>
+  For local development you can set `VITE_OPENAI_API_KEY` in your `.env.local` file to bypass the edge function. In production, keys must route through the `realtime-client-secret` Supabase Function — never expose service tokens in the renderer.
+</Note>
+
+## VoiceSelectionContext
+
+Pages that need to highlight or scroll UI elements in response to voice commands use `VoiceSelectionContext`:
+
+```typescript
+import { useVoiceSelection } from '@/voice/VoiceSelectionContext';
+
+function ShotCard({ shotId }: { shotId: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const { registerTarget } = useVoiceSelection();
+
+  useEffect(() => {
+    return registerTarget(shotId, ref);
+  }, [shotId]);
+
+  return <div ref={ref}>{/* ... */}</div>;
+}
+```
+
+`scrollVoiceTargetIntoView(id)` scrolls the registered element into the viewport and applies a brief selection highlight — used by `timeline_select_shot`, `ip_vault_select_item`, and similar actions.
+
+## Test Harness
+
+In development builds with `VITE_BYPASS_AUTH_FOR_TESTS=true`, a global test harness is attached to `window`:
+
+```typescript
+window.__wzrdVoiceActionTest = {
+  execute: (name, input?, options?) => registry.execute(name, input, options),
+};
+```
+
+This lets you invoke any registered voice action from the browser console or from Playwright tests without speaking:
+
+```javascript
+// In browser DevTools or a Playwright test
+await window.__wzrdVoiceActionTest.execute('navigate_app', { target: 'kanvas_image' });
+// → { ok: true, status: 'completed', message: 'Opened kanvas_image.', data: { path: '/kanvas?studio=image' } }
+```
+
+<Warning>
+  The `__wzrdVoiceActionTest` harness is only attached when both `import.meta.env.DEV` is true and `VITE_BYPASS_AUTH_FOR_TESTS` is `"true"`. It is stripped from production builds.
+</Warning>
+
+## Out-of-Band Narration
+
+Pages can push contextual narration to the voice agent without the user pressing the mic button. Fire the `wzrd:voice-oob-narrate` custom DOM event:
+
+```typescript
+window.dispatchEvent(
+  new CustomEvent('wzrd:voice-oob-narrate', {
+    detail: {
+      text: 'Storyline generation is complete. Your project has 12 scenes and 48 shots.',
+      topic: 'storyline_stream',
+    },
+  })
+);
+```
+
+The active Realtime session will speak the update as a single concise highlight. If no session is connected, the event is silently ignored.

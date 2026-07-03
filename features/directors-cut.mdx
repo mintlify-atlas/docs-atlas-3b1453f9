@@ -1,0 +1,336 @@
+---
+title: "Director's Cut: Auto-Assemble Your Final Video"
+sidebarTitle: "Director's Cut"
+description: "Director's Cut assembles generated shots into a final video automatically. Trigger via the UI or MCP, poll for stage completion, and download the output."
+---
+
+Director's Cut is the final step of the WZRD Studio creation pipeline. Once every shot in your storyboard has an image or video, Director's Cut syncs those assets into a chronological timeline, submits the job to a cloud video renderer (Fal-first with an automatic Editframe fallback), and returns a downloadable final video. The entire process is non-blocking — you trigger it, then poll until the `completed` stage is reached.
+
+## Route
+
+```
+/projects/:projectId/directors-cut
+```
+
+The page loads the project title and aspect ratio, immediately calls `syncAssets` to pre-check readiness, and renders the current job state if one already exists for the project.
+
+---
+
+## Before You Start
+
+Director's Cut requires every ordered shot to have at least an image (videos are preferred but images are accepted as fallbacks). The **Sync Timeline Assets** action checks readiness and surfaces blocking reasons before you can trigger the export.
+
+<CardGroup cols={3}>
+  <Card title="Shots" icon="film">
+    Total ordered shots across all scenes in the project.
+  </Card>
+  <Card title="Ready Shots" icon="circle-check">
+    Shots with at least one visual asset (video or fallback image).
+  </Card>
+  <Card title="Missing" icon="triangle-exclamation">
+    Shots with neither an image nor a video. These block export.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Ready Videos" icon="video">
+    Shots with a completed `video_url`. Videos are preferred over images for a smoother output.
+  </Card>
+  <Card title="Image Fallbacks" icon="image">
+    Shots that have an image but no video. These are still included in the export at a 5-second fixed duration.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Export is blocked if `summary.canExport` is `false`. The UI surfaces a `blockingReason` listing the specific shots that are missing visuals. Go back to the Storyboard, generate the missing images or videos, then return to Director's Cut.
+</Warning>
+
+---
+
+## How It Works
+
+<Steps>
+  <Step title="Sync Timeline Assets">
+    Click **Sync Timeline Assets** or it runs automatically on page load. This calls:
+
+    ```http
+    POST /functions/v1/director-cut
+    Content-Type: application/json
+    Authorization: Bearer <access_token>
+
+    { "action": "sync", "projectId": "uuid" }
+    ```
+
+    The edge function rebuilds the `timeline_assets` table for the project — one row per shot visual (in `position_order`), plus audio tracks for any shot with dialogue or sound effects, plus any `final_project_assets` music files mapped to the `music` track. It returns a `DirectorCutSummary`.
+  </Step>
+  <Step title="Start Director's Cut">
+    Click **Start Director's Cut** (`DIRECTORS_CUT_CREDITS` credits). This invokes:
+
+    ```http
+    POST /functions/v1/director-cut
+
+    { "action": "create", "projectId": "uuid" }
+    ```
+
+    The function checks readiness, loads the synced `timeline_assets`, and inserts an `export_jobs` row with `status: 'processing'`. It then calls `processAssetsRemote` in the background (via `EdgeRuntime.waitUntil`) and returns a `jobId` immediately.
+
+    ```json
+    {
+      "success": true,
+      "status": "processing",
+      "jobId": "uuid",
+      "progress": 5,
+      "provider": "fal_remote",
+      "providerStatus": "queued"
+    }
+    ```
+  </Step>
+  <Step title="Poll for Status">
+    The `useDirectorCut` hook polls every **2 seconds** using:
+
+    ```http
+    POST /functions/v1/director-cut
+
+    { "action": "status", "projectId": "uuid", "jobId": "uuid" }
+    ```
+
+    The response maps directly to `DirectorCutJobState`. Polling stops automatically when `status` becomes `completed` or `failed`.
+  </Step>
+  <Step title="Download the Final Video">
+    When `job.status === 'completed'`, the `outputUrl` field contains a public URL to the assembled video stored in the `final-exports` Supabase Storage bucket. A video player renders inline and a **Download Final Video** button links directly to the URL.
+  </Step>
+</Steps>
+
+---
+
+## Pipeline Stages
+
+The Director's Cut engine progresses through a fixed sequence of stages. The `StageIndicator` component on the page renders each stage with a live spinner on the active stage and checkmarks on completed ones.
+
+| Stage constant | `STAGE_LABELS` display |
+|----------------|----------------------|
+| `syncing_assets` | Syncing timeline assets |
+| `preflighting_assets` | Checking media URLs |
+| `submitting_to_provider` | Submitting to provider |
+| `provider_processing` | Provider processing |
+| `fallback_processing` | Editframe fallback |
+| `downloading_assets` | Downloading assets |
+| `uploading_final_video` | Uploading final video |
+| `completed` | Completed |
+| `failed` | Failed |
+
+<Info>
+  The `fallback_processing` stage is reached when the primary Fal renderer is unavailable. The Editframe fallback requires the `EDITFRAME_API_KEY` secret to be configured in the Supabase edge function environment. If the secret is missing, the UI surfaces a targeted setup instruction.
+</Info>
+
+---
+
+## Type Reference
+
+### `DirectorCutJobState`
+
+The full state object maintained by `useDirectorCut` and rendered on the page.
+
+<ResponseField name="jobId" type="string">
+  UUID of the `export_jobs` row.
+</ResponseField>
+
+<ResponseField name="status" type="string">
+  One of: `pending` | `processing` | `completed` | `failed`.
+</ResponseField>
+
+<ResponseField name="progress" type="number">
+  Integer 0–100. Clamped by `clampProgress`.
+</ResponseField>
+
+<ResponseField name="stage" type="DirectorCutStage">
+  Current pipeline stage. Drives the `StageIndicator` and the status label in the progress bar header.
+</ResponseField>
+
+<ResponseField name="outputUrl" type="string | null">
+  Public download URL. Populated only when `status === 'completed'`.
+</ResponseField>
+
+<ResponseField name="provider" type="string | null">
+  Renderer that processed the job — typically `'fal_remote'`.
+</ResponseField>
+
+<ResponseField name="fallbackUsed" type="boolean">
+  `true` when the Editframe fallback was activated.
+</ResponseField>
+
+<ResponseField name="shotFailures" type="ShotFailureInfo[]">
+  Array of `{ assetId, orderIndex, reason }` entries for any shots that could not be rendered. Non-empty with `partialSuccess: true` means the video was produced from the remaining shots.
+</ResponseField>
+
+<ResponseField name="partialSuccess" type="boolean">
+  `true` when the video completed despite some shot failures. A warning panel lists the skipped shots.
+</ResponseField>
+
+<ResponseField name="debugSummary" type="DirectorCutDebugSummary">
+  Extended diagnostics: `renderer`, `falRequestId`, `providerJobId`, `fallbackReason`, `fallbackStatus`, `fallbackError`, `falError`, `failedShotCount`, `visualTracks`, `audioTracks`.
+</ResponseField>
+
+---
+
+### `DirectorCutSummary`
+
+Returned by `sync` and checked before `create`.
+
+<ResponseField name="totalShots" type="number">
+  Total ordered shots across all scenes.
+</ResponseField>
+
+<ResponseField name="syncedAssets" type="number">
+  Number of `timeline_assets` rows written during the last sync.
+</ResponseField>
+
+<ResponseField name="readyVideos" type="number">
+  Shots with a `video_url`.
+</ResponseField>
+
+<ResponseField name="fallbackImages" type="number">
+  Shots with only an `image_url` (will be rendered as a 5-second still).
+</ResponseField>
+
+<ResponseField name="missingShots" type="number">
+  Shots with neither image nor video. Must be zero for export to proceed.
+</ResponseField>
+
+<ResponseField name="canExport" type="boolean">
+  `true` when there are no missing shots and at least one visual asset exists.
+</ResponseField>
+
+<ResponseField name="blockingReason" type="string | null">
+  Human-readable explanation of why export is blocked. `null` when `canExport` is `true`.
+</ResponseField>
+
+<ResponseField name="missingShotDetails" type="DirectorCutMissingShotDetail[]">
+  Per-shot breakdown of missing visuals — `shotId`, `sceneNumber`, `shotNumber`, `reason`, `imageStatus`, `videoStatus`.
+</ResponseField>
+
+---
+
+## Credit Cost
+
+```ts
+import { DIRECTORS_CUT_CREDITS } from '@/lib/constants/credits';
+// → 12 (derived from getModelCredits('fal-ai/ffmpeg-api/compose'))
+```
+
+The credit cost is displayed on the **Start Director's Cut** button in both the Storyboard page (via `ConfirmGenerateDialog`) and directly on the button label in the Director's Cut page itself.
+
+---
+
+## `useDirectorCut` Hook
+
+All page logic is encapsulated in this hook, exported from `src/hooks/useDirectorCut.ts`.
+
+| Export | Type | Description |
+|--------|------|-------------|
+| `summary` | `DirectorCutSummary \| null` | Latest sync summary. |
+| `job` | `DirectorCutJobState \| null` | Current or last-known job state. |
+| `error` | `string \| null` | Top-level error string from the latest failed operation. |
+| `isSyncing` | `boolean` | `true` while `syncAssets` is in flight. |
+| `isStarting` | `boolean` | `true` while `startDirectorCut` is submitting. |
+| `isPolling` | `boolean` | `true` while the 2-second poll interval is active. |
+| `syncAssets()` | `async function` | Calls `action: 'sync'`. Returns the new `DirectorCutSummary`. |
+| `startDirectorCut(options?)` | `async function` | Syncs (unless `reuseSyncedAssets: true`), then calls `action: 'create'` or `'retry'`, and starts polling. |
+| `stopPolling()` | `function` | Cancels the poll timer. Called automatically on unmount. |
+
+---
+
+## StatCards
+
+The seven metric cards at the top of the page map directly to `DirectorCutSummary` fields:
+
+| Label | Field | Tone |
+|-------|-------|------|
+| Shots | `totalShots` | default |
+| Ready Shots | `readyShots` | success (orange) |
+| Synced Assets | `syncedAssets` | default |
+| Ready Videos | `readyVideos` | success (orange) |
+| Image Fallbacks | `fallbackImages` | warn (amber) |
+| Audio | `audioAssets` | default |
+| Missing | `missingShots` | warn (amber) |
+
+---
+
+## Local Assembly Panel
+
+For users running the WZRD Electron desktop app, `LocalAssemblyPanel` provides an alternative FFmpeg-based export that runs entirely on-device — no cloud credits required.
+
+```tsx
+<LocalAssemblyPanel
+  projectId={projectId}
+  projectTitle={projectMeta.title}
+  aspectRatio={projectMeta.aspectRatio}
+/>
+```
+
+The panel uses the `getDesktopBridge()` Electron IPC bridge. It is rendered below the main cloud export UI and is only functional when the desktop bridge is present.
+
+---
+
+## Error Recovery
+
+When a Director's Cut job fails, the page shows a diagnostic panel with:
+
+- The error message from `job.error`
+- Provider name and status
+- Whether the fallback was used
+- A **Render diagnostics** section with `renderer`, `stage`, `falRequestId`, `providerJobId`, and `fallbackError` fields
+- A **Copy Debug Details** button that copies the full `DirectorCutJobState` as formatted JSON to the clipboard
+- Per-shot failure details when `job.shotFailures` is non-empty
+
+Two recovery actions are available:
+
+| Button | Action |
+|--------|--------|
+| Sync Again | Calls `syncAssets()` to rebuild `timeline_assets` |
+| Retry Export | Calls `startDirectorCut({ reuseSyncedAssets: true })` to skip re-syncing and reuse the last synced asset list |
+
+---
+
+## MCP Tool: `make_magic`
+
+The `make_magic` MCP tool orchestrates the entire WZRD pipeline end-to-end, including Director's Cut. An agent using this tool does not need to navigate the UI at all.
+
+**Skill**: `agent-skills/make-magic/skill.md`
+
+<Steps>
+  <Step title="Create project">
+    ```http
+    POST /functions/v1/project-create
+    { "concept": "A road trip across the American Southwest", "format": "short" }
+    ```
+    Returns `project_id`.
+  </Step>
+  <Step title="Wait for storyline">
+    Poll `/functions/v1/storyline-status?project_id=<uuid>` until `status === 'complete'`.
+  </Step>
+  <Step title="Generate all visuals">
+    ```http
+    POST /functions/v1/project-auto-generate
+    { "project_id": "uuid", "phase": "images" }
+    ```
+    Then repeat with `"phase": "videos"`.
+  </Step>
+  <Step title="Trigger Director's Cut">
+    ```http
+    POST /functions/v1/director-cut
+    { "action": "create", "projectId": "uuid" }
+    ```
+  </Step>
+  <Step title="Poll until final video">
+    ```http
+    POST /functions/v1/director-cut
+    { "action": "status", "projectId": "uuid", "jobId": "uuid" }
+    ```
+    Repeat until `status === 'completed'` and `outputUrl` is present.
+  </Step>
+</Steps>
+
+<Tip>
+  Always check `/billing/credits` before triggering `make_magic`. The pipeline deducts credits at each step — storyline generation, image generation, video generation, and the Director's Cut assembly — so a low balance can stall mid-way.
+</Tip>

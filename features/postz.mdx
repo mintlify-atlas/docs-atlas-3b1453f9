@@ -1,0 +1,266 @@
+---
+title: "Postz: Multi-Channel Social Media Scheduler"
+sidebarTitle: "Postz"
+description: "Postz lets you connect social channels via OAuth, compose posts with project media, and schedule or publish content from a drag-and-drop calendar."
+---
+
+Postz is WZRD Studio's built-in social media command center. Connect your accounts once via secure OAuth, then compose, schedule, and track posts across every major platform — all without leaving the Studio. A month-view calendar gives you a live picture of your content pipeline, and finalized video assets flow directly from your project library into the post composer.
+
+## Route
+
+`/postz`
+
+## Supported Channels
+
+Postz supports OAuth connections to the following providers. Each provider is labelled and colour-coded in the channel rail and composer.
+
+<CardGroup cols={3}>
+  <Card title="TikTok" icon="tiktok">
+    Short-form video. Up to 2,200-character caption. Media required.
+  </Card>
+  <Card title="Instagram" icon="instagram">
+    Feed posts and Reels. Up to 2,200 characters. Up to 10 media items. Media required.
+  </Card>
+  <Card title="YouTube" icon="youtube">
+    Long-form and Shorts. Up to 5,000-character description. Title required. Media required.
+  </Card>
+  <Card title="X (Twitter)" icon="x-twitter">
+    Up to 280 characters. Up to 4 media items.
+  </Card>
+  <Card title="Threads" icon="at-sign">
+    Up to 500 characters. Up to 10 media items.
+  </Card>
+  <Card title="LinkedIn / LinkedIn Page" icon="linkedin">
+    Up to 3,000 characters. Up to 9 media items.
+  </Card>
+  <Card title="Facebook" icon="facebook">
+    Standard feed posts with optional media.
+  </Card>
+  <Card title="Discord & Telegram" icon="comments">
+    Text-first channels with optional media.
+  </Card>
+  <Card title="Bluesky & Mastodon" icon="at-sign">
+    Open-protocol social. Decentralised publishing.
+  </Card>
+</CardGroup>
+
+## Core Workflow
+
+<Steps>
+  <Step title="Connect a channel">
+    Click **Add channel** in the channel rail. Postz opens the provider's OAuth consent screen in your default browser. After granting access the provider redirects back to the `wzrd://postz/connected` deep link, which Electron catches and forwards to the running app.
+
+    For providers that expose multiple targets (e.g. a Facebook account that manages several Pages), a **Complete connection** dialog appears so you can pick the exact profile or page to link.
+  </Step>
+  <Step title="Compose a post">
+    Press **New post**, or click any day on the calendar. The Post Composer opens with:
+    - A per-channel content editor with live character counts and validation feedback
+    - A scheduled date/time picker (rounded to the nearest 15 minutes by default)
+    - An attach-media panel that pulls directly from your finalized project assets
+    - Repeat scheduling (daily interval) and first-comment support
+  </Step>
+  <Step title="Set the post state">
+    Choose the lifecycle state before saving:
+
+    | State | Meaning |
+    |---|---|
+    | `DRAFT` | Saved locally; not queued for publishing |
+    | `QUEUE` | Scheduled — will be picked up by the publisher at `publish_date` |
+    | `PUBLISHING` | Currently being sent to the provider |
+    | `PUBLISHED` | Successfully delivered |
+    | `ERROR` | Publish attempt failed; error message stored on the post |
+  </Step>
+  <Step title="Reschedule via drag-and-drop">
+    Drag any post group on the calendar to a new day to reschedule it. Postz preserves the original time-of-day and calls `useReschedulePostzGroup` to update the `publish_date` in the backend.
+  </Step>
+  <Step title="Filter and track">
+    Use the **StatePills** filter bar above the calendar to narrow the view to any single state. Per-state counts are derived from the current calendar window so the numbers always reflect what you see.
+  </Step>
+</Steps>
+
+## Post Composer
+
+The composer groups individual per-channel posts into a **post group** (`group_id`). All channels in a group share the same `publish_date` and state, but each channel carries its own content, media list, title, description, and settings.
+
+<Tabs>
+  <Tab title="Content">
+    Each channel tab in the composer contains its own text area. Character limits are validated on the server against the `CAPABILITIES_BY_PROVIDER` table in `postz-posts`:
+
+    ```
+    x              → 280 chars, 4 media max
+    tiktok         → 2,200 chars, 1 media (required)
+    instagram      → 2,200 chars, 10 media (required)
+    threads        → 500 chars, 10 media
+    youtube        → 5,000 chars, 1 media (required), title required
+    linkedin       → 3,000 chars, 9 media
+    linkedin-page  → 3,000 chars, 9 media
+    ```
+
+    Validation runs on both create and update. Any hard errors (wrong type `"error"`) block the save and are returned as `per_channel` issues.
+  </Tab>
+  <Tab title="Media">
+    Media is attached as `PostzMediaRef` objects:
+
+    ```typescript
+    type PostzMediaRef = {
+      asset_id: string;       // references a ProjectAsset row
+      cdn_url?: string;       // public CDN URL
+      mime_type?: string;
+      kind?: "image" | "video" | "gif";
+      width?: number;
+      height?: number;
+      duration_seconds?: number;
+      size_bytes?: number;
+    };
+    ```
+
+    The **Finalized assets** panel in the sidebar lists the 8 most recent finalized videos from your project. Click **Use** to pre-populate the composer's media with that asset and open a new post.
+  </Tab>
+  <Tab title="Scheduling">
+    The scheduler suggests the next open slot from a channel's `posting_times` array (minutes from midnight UTC). If no channel is connected, it defaults to now + 15 minutes.
+
+    Recurring posts are supported via `repeat.interval_in_days` — setting an interval causes the publisher to re-queue the post automatically after each successful publish.
+  </Tab>
+</Tabs>
+
+## Calendar View
+
+The calendar renders a full month grid anchored to the `anchor` date. It always loads a window from the Sunday before the 1st to the Saturday after the last day of the month, so partial weeks at the edges are always populated.
+
+<Info>
+  Clicking the **Previous** / **Next** arrows shifts the `anchor` by one calendar month and re-fetches posts for the new window. React Query caches each window independently so switching back is instant.
+</Info>
+
+Post groups are rendered on the day matching their `publish_date`. Each group chip shows the provider icons and state colour. Click a chip to open the composer in edit mode for that group.
+
+## Desktop OAuth Deep Link
+
+When Electron handles a `wzrd://` URI it routes `postz/connected` paths to `/postz?connected=1&...`. The allowed query parameters are sanitised before forwarding:
+
+| Parameter | Format | Meaning |
+|---|---|---|
+| `provider` | `[a-z0-9-]+` | Provider identifier (e.g. `youtube`) |
+| `channel` | `[a-z0-9-]+` | Newly created channel ID |
+| `status` | `success` \| `error` \| `needs_target` | OAuth result |
+| `state_id` | UUID | OAuth state row ID (used when `needs_target`) |
+
+<Warning>
+  The `status=needs_target` flow requires a second step in the UI. The **Complete Channel** dialog fetches available targets (pages, profiles, channels) from the provider using the cached access token and lets the user pick one before the channel row is written to the database.
+</Warning>
+
+## React Query Hooks
+
+All data fetching in Postz is managed through React Query hooks defined in `src/hooks/usePostz.ts`.
+
+<Accordion title="usePostzChannels">
+  Fetches the user's connected channels from the `postz-channels` edge function. Stale time: 10 seconds.
+
+  ```typescript
+  const channelsQuery = usePostzChannels();
+  // channelsQuery.data → PostzChannel[]
+  ```
+</Accordion>
+
+<Accordion title="usePostzPostsWindow">
+  Fetches all posts within a date range, optionally filtered by state. Used to populate the calendar.
+
+  ```typescript
+  const postsQuery = usePostzPostsWindow({
+    from: windowFrom.toISOString(),
+    to: windowTo.toISOString(),
+    state: "QUEUE" | null,
+  });
+  ```
+</Accordion>
+
+<Accordion title="usePostzGroup">
+  Fetches a single post group by `group_id`. Used to pre-populate the composer when editing an existing group.
+
+  ```typescript
+  const groupQuery = usePostzGroup(editingGroupId);
+  // groupQuery.data → PostzGroup { group_id, posts: PostzPost[] }
+  ```
+</Accordion>
+
+<Accordion title="useReschedulePostzGroup">
+  Mutation that updates `publish_date` for every post in a group. Called by the drag-and-drop calendar handler.
+
+  ```typescript
+  const reschedule = useReschedulePostzGroup();
+  reschedule.mutate({ group_id: "...", publish_date: newDate.toISOString() });
+  ```
+</Accordion>
+
+<Accordion title="useCreatePostzGroup / useUpdatePostzGroup">
+  Mutations for saving new post groups and updating existing ones. Both accept a `PostzPostGroupCreateInput` payload and invalidate the posts window cache on success.
+</Accordion>
+
+<Accordion title="useDeletePostzGroup / useFindPostzSlot">
+  `useDeletePostzGroup` soft-deletes a group by setting `deleted_at`. `useFindPostzSlot` asks the server to compute the next recommended publish time based on the channel's `posting_times` schedule.
+</Accordion>
+
+## Edge Functions
+
+<CardGroup cols={3}>
+  <Card title="postz-channels" icon="server">
+    **Actions:** `list`, `seed`
+
+    Lists all non-deleted channel rows for the authenticated user. Token material is never returned to the client — only display fields are selected.
+  </Card>
+  <Card title="postz-posts" icon="server">
+    **Actions:** `list`, `get`, `get-group`, `create`, `update`, `update-date`, `delete`, `duplicate`, `validate`, `find-slot`, `post-now`
+
+    Full CRUD for post groups. Runs capability validation on every create and update. The `find-slot` action uses a channel's `posting_times` array to compute the next available slot.
+  </Card>
+  <Card title="postz-oauth" icon="server">
+    **Actions:** `list-providers`, `start`, `list-targets`, `finalize`
+
+    Manages the full OAuth lifecycle. Tokens are AES-GCM encrypted at rest using `encryptToken` / `decryptToken`. The GET handler processes provider callbacks and redirects to `wzrd://postz/connected`.
+  </Card>
+</CardGroup>
+
+## Data Types Reference
+
+<Accordion title="PostzChannel">
+```typescript
+type PostzChannel = {
+  id: string;
+  provider: PostzProvider;          // "youtube" | "tiktok" | "instagram" | ...
+  provider_account_id: string;
+  name: string | null;
+  username: string | null;
+  picture: string | null;
+  status: PostzChannelStatus;       // "connected" | "needs_reauth" | "disabled" | "error"
+  disabled: boolean;
+  posting_times: PostzPostingTime[]; // [{ time: number }] — minutes from midnight UTC
+  token_expires_at: string | null;
+  created_at: string;
+};
+```
+</Accordion>
+
+<Accordion title="PostzPost">
+```typescript
+type PostzPost = {
+  id: string;
+  channel_id: string;
+  group_id: string;
+  state: PostzPostState;            // "DRAFT" | "QUEUE" | "PUBLISHING" | "PUBLISHED" | "ERROR"
+  publish_date: string;             // ISO 8601
+  content: string;
+  title: string | null;
+  description: string | null;
+  media: PostzMediaRef[];
+  poll: PostzPoll | null;
+  first_comment: string | null;
+  interval_in_days: number | null;  // recurring post interval
+  creation_method: "ui" | "ai" | "api" | "autopost";
+  error: string | null;
+  attempts: number;
+};
+```
+</Accordion>
+
+<Tip>
+  Use **Seed demo channels** (available when no channels are connected) to instantly populate your channel rail with demo YouTube, TikTok, and Instagram entries. This lets you explore the calendar and composer without going through the full OAuth flow first.
+</Tip>

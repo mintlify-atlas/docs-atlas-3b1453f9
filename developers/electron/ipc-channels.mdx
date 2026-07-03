@@ -1,0 +1,1092 @@
+---
+title: "IPC Channels: Electron Renderer-to-Main Communication"
+sidebarTitle: "IPC Channels"
+description: "Reference for all IPC channels exposed by WZRD Studio's Electron preload. Covers media operations, clip studio, FFmpeg, YouTube, and QCut bridge channels."
+---
+
+WZRD Studio's Electron preload (`electron/preload.cjs`) exposes two context-bridge globals — `window.wzrdDesktop` and `window.wzrdQcut` — each of which wraps a set of `ipcRenderer.invoke` calls and push-event subscriptions. This page documents every channel by group, including its request shape, response shape, and any progress events it emits. All channels use Electron's `ipcMain.handle` / `ipcRenderer.invoke` pattern unless noted as a push-only event.
+
+<Info>
+  The TypeScript types shown here are extracted from `src/lib/desktop.ts` and `electron/preload.cjs`. Import `WzrdDesktopBridge` from `@/lib/desktop` in your renderer code — never reference `window.wzrdDesktop` directly.
+</Info>
+
+---
+
+## `wzrd:media:*` — Core Media Operations
+
+These channels are exposed as methods on `window.wzrdDesktop` and handle media probing, thumbnail extraction, waveform analysis, proxy rendering, and full timeline export. They are implemented in `electron/main.js` using FFmpeg arg builders from `electron/media-ffmpeg-commands.js`.
+
+### `wzrd:media:probe`
+
+Returns FFprobe metadata for a local media file: duration, streams, format, and codec details.
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface ProbeMediaParams {
+      filePath: string;       // Absolute local path to the media file
+      ffmpegPath?: string;    // Optional override for the ffmpeg binary location
+    }
+    ```
+
+    ```typescript
+    // Renderer usage via bridge
+    const metadata = await window.wzrdDesktop.probeMedia({ filePath: '/path/to/clip.mp4' });
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```typescript
+    interface DesktopVideoMetadata {
+      durationSeconds: number;
+      width?: number;
+      height?: number;
+      fps?: number;
+      videoCodec?: string;
+      audioCodec?: string;
+      bitrate?: number;
+      format?: string;
+      streams: Array<{
+        type: 'video' | 'audio' | 'subtitle' | 'data';
+        codec: string;
+        index: number;
+      }>;
+    }
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Internally calls `ffprobe -v quiet -print_format json -show_format -show_streams` on the resolved binary path. Throws if FFprobe is unavailable.
+</Note>
+
+---
+
+### `wzrd:media:extract-thumbnail`
+
+Extracts a single JPEG frame at a given timestamp from a local video file.
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface ExtractThumbnailParams {
+      operationId: string;   // Unique ID — also used to correlate progress events
+      sourcePath: string;    // Absolute local path to the source video
+      outputPath: string;    // Absolute local path where the .jpg will be written
+      atMs: number;          // Timestamp in milliseconds
+      ffmpegPath?: string;
+    }
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```typescript
+    interface ExtractThumbnailResult {
+      outputPath: string;    // Confirmed absolute path of the written JPEG
+    }
+    ```
+  </Tab>
+  <Tab title="Progress Events">
+    Emits `wzrd:media:progress` twice: `stage: "starting"` at 0 % and `stage: "completed"` at 100 %. Subscribe with `window.wzrdDesktop.onMediaProgress(cb)`.
+
+    ```typescript
+    interface MediaProgress {
+      operationId: string;
+      stage: 'starting' | 'running' | 'completed' | 'failed';
+      percent: number;        // 0–100
+      clipTitle?: string;
+      sourceName?: string;
+      outputName?: string;
+      message: string;
+      detail?: string;
+      stderrTail?: string;
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+### `wzrd:media:extract-waveform-peaks`
+
+Decodes an audio track to raw 32-bit float PCM via FFmpeg's `pipe:1` output and buckets it into peak amplitude values for waveform visualization.
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface ExtractWaveformPeaksParams {
+      operationId: string;
+      sourcePath: string;       // Local audio or video file
+      outputPath?: string;      // If provided, peaks JSON is written here too
+      resolution?: number;      // Number of buckets — default 1024, clamped 64–16384
+      sampleRate?: number;      // Decode sample rate — default 8000 Hz, clamped 100–48000
+      ffmpegPath?: string;
+    }
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```typescript
+    interface WaveformPeaksResult {
+      sourcePath: string;
+      outputPath?: string;
+      resolution: number;
+      sampleRate: number;
+      peaks: number[];          // Array of peak values in [0, 1], length ≤ resolution
+    }
+    ```
+
+    ```json
+    {
+      "sourcePath": "/Users/alice/clips/interview.mp4",
+      "resolution": 512,
+      "sampleRate": 8000,
+      "peaks": [0.012, 0.087, 0.342, 0.91, ...]
+    }
+    ```
+  </Tab>
+  <Tab title="Progress Events">
+    Emits `wzrd:media:progress` with `clipTitle: "audio.waveform"`. Stages: `starting → running → completed | failed`.
+
+    The `running` stage fires on each stdout chunk from FFmpeg, so frequency depends on file length.
+  </Tab>
+</Tabs>
+
+<Warning>
+  The raw PCM buffer is capped at 64 MB. Files requiring more samples should use a lower `sampleRate` or a shorter proxy clip.
+</Warning>
+
+---
+
+### `wzrd:media:render-proxy`
+
+Renders a low-resolution preview proxy of a local video file, suitable for scrubbing and playback in the editor canvas.
+
+<ParamField body="operationId" type="string" required>
+  Unique identifier for this proxy job. Used to correlate `wzrd:media:progress` events.
+</ParamField>
+<ParamField body="sourcePath" type="string" required>
+  Absolute local path to the source video.
+</ParamField>
+<ParamField body="outputPath" type="string" required>
+  Absolute local path where the proxy MP4 will be written.
+</ParamField>
+<ParamField body="maxWidth" type="number">
+  Maximum proxy width in pixels. Defaults to `1280`. The FFmpeg scale filter uses `force_original_aspect_ratio=decrease`.
+</ParamField>
+<ParamField body="maxHeight" type="number">
+  Maximum proxy height in pixels. Defaults to `720`.
+</ParamField>
+<ParamField body="ffmpegPath" type="string">
+  Optional absolute path to the `ffmpeg` binary.
+</ParamField>
+
+<ResponseField name="outputPath" type="string">
+  Confirmed absolute path of the written proxy file.
+</ResponseField>
+
+```typescript
+// IPC channel: wzrd:media:render-preview-proxy
+// Bridge method: window.wzrdDesktop.renderPreviewProxy(params)
+const result = await bridge.renderPreviewProxy({
+  operationId: 'proxy-001',
+  sourcePath: '/Users/alice/clips/raw.mov',
+  outputPath: '/Users/alice/Library/Application Support/WZRD Studio/clipper/proxy-001.mp4',
+  maxWidth: 960,
+  maxHeight: 540,
+});
+```
+
+Emits `wzrd:media:progress` at `starting → running → completed | failed`.
+
+---
+
+### `wzrd:media:render-timeline`
+
+Renders a full multi-track timeline to an MP4 file using a complex FFmpeg filter graph. This is WZRD Studio's local export pipeline — it supports video tracks, audio tracks, text overlays, graphic elements, keyframe animation, and per-track effects and masks.
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface RenderTimelineParams {
+      operationId: string;
+      outputPath: string;               // Final output MP4 path
+      timeline: LocalTimelineRenderPlan; // Full timeline data structure (see below)
+      ffmpegPath?: string;
+    }
+
+    interface LocalTimelineRenderPlan {
+      composition: {
+        width: number;
+        height: number;
+        fps: number;
+        durationMs: number;
+        backgroundColor?: string;       // Hex color, e.g. "#000000"
+      };
+      visualTracks: VisualTrack[];      // Ordered by layer ascending
+      audioTracks: AudioTrack[];
+      exportSettings: {
+        outputPath: string;
+        format?: 'mp4';                 // Only MP4 supported for local export
+        quality?: 'low' | 'medium' | 'high' | '4k';
+        includeAudio?: boolean;
+        fastStart?: boolean;            // Adds -movflags +faststart
+      };
+    }
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```typescript
+    interface RenderTimelineResult {
+      outputPath: string;
+    }
+    ```
+  </Tab>
+  <Tab title="Validation Rules">
+    `validateTimelineRenderPlan` (from `electron/media-ffmpeg-commands.js`) enforces these constraints before spawning FFmpeg:
+
+    - At least one visual track must be present.
+    - All source paths must be local (no remote URLs).
+    - Track types must be `video`, `image`, `text`, or `element`.
+    - Playback rates must be greater than zero.
+    - Visual keyframe properties must be one of `position`, `scale`, `rotation`, or `opacity`.
+    - Effects must be from the supported set: `blur`, `brightness`, `contrast`, `saturation`, `exposure`, `sharpen`, `grayscale`, `sepia`, `invert`, `vignette`, `grain`, `noise`.
+    - Masks must be `rectangle` or `ellipse`.
+  </Tab>
+</Tabs>
+
+Emits `wzrd:media:progress` throughout. The `percent` value is derived from the FFmpeg `time=` output relative to the total composition duration.
+
+---
+
+### `wzrd:media:cache-remote-media`
+
+Downloads a remote media URL and caches it locally so it can be used in FFmpeg export pipelines (which require local file paths).
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface CacheRemoteMediaParams {
+      operationId: string;
+      url: string;       // Must be http:// or https://
+      name?: string;     // Suggested filename stem
+    }
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```typescript
+    interface CacheRemoteMediaResult {
+      name: string;       // Resolved filename in the cache directory
+      path: string;       // Absolute path: userData/media-cache/<name>
+      size: number;       // Bytes
+      mimeType?: string;  // Content-Type from the response headers
+      mediaUrl: string;   // wzrd://media/?file=<encoded-path> — ready for playback
+    }
+    ```
+  </Tab>
+</Tabs>
+
+The file is saved to `userData/media-cache/` with a SHA-256 hash suffix to avoid collisions. The path is automatically added to the media access allow-list. Emits `wzrd:media:progress` at `starting` and `completed`.
+
+---
+
+### `wzrd:media:resolve-url`
+
+Validates and resolves a `wzrd://media/?file=…` URL for playback. Returns the URL string if the path is in the allow-list.
+
+```typescript
+// IPC channel: wzrd:clip-studio:resolve-media-file-url
+// Bridge method: window.wzrdDesktop.resolveMediaFileUrl(params)
+const mediaUrl = await bridge.resolveMediaFileUrl({ filePath: '/abs/path/to/video.mp4' });
+// → "wzrd://media/?file=%2Fabs%2Fpath%2Fto%2Fvideo.mp4"
+```
+
+Throws with a `403`-equivalent error if the path has not been allow-listed.
+
+---
+
+### `wzrd:media:progress` — Push Event
+
+A push-only event emitted by the main process during all long-running media operations. Subscribe via `window.wzrdDesktop.onMediaProgress(callback)`.
+
+```typescript
+// Subscribe
+const unsubscribe = bridge.onMediaProgress((progress) => {
+  console.log(`[${progress.operationId}] ${progress.stage} ${progress.percent}%`);
+});
+
+// Unsubscribe when the component unmounts
+useEffect(() => unsubscribe, []);
+```
+
+```typescript
+interface MediaProgress {
+  operationId: string;
+  stage: 'starting' | 'running' | 'completed' | 'failed';
+  percent: number;         // Integer 0–100
+  clipTitle?: string;      // Human-readable action name
+  sourceName?: string;     // Basename of the source file
+  outputName?: string;     // Basename of the output file
+  timeSeconds?: number;    // Current FFmpeg encode position
+  message: string;         // User-facing status text
+  detail?: string;         // Extended diagnostic detail
+  stderrTail?: string;     // Last 8 KB of FFmpeg stderr (on failure)
+}
+```
+
+---
+
+## `wzrd:clip-studio:*` — Clip Studio Operations
+
+These channels serve the Clip Studio feature: video import, trimming, vertical export, thumbnail generation, and YouTube download. They are exposed on `window.wzrdDesktop` alongside the `wzrd:media:*` methods.
+
+### `wzrd:clip-studio:probe`
+
+```typescript
+// IPC channel: wzrd:clip-studio:get-video-metadata
+// Bridge method: window.wzrdDesktop.getVideoMetadata(params)
+const metadata = await bridge.getVideoMetadata({ filePath: '/path/to/clip.mp4' });
+```
+
+Identical response shape to `wzrd:media:probe`. This is the legacy clip-studio alias; prefer `probeMedia` for new code.
+
+---
+
+### `wzrd:clip-studio:cut`
+
+Trims a video to an in/out range using **stream copy** (`-c copy`), so no re-encoding occurs. Very fast for most formats.
+
+<ParamField body="operationId" type="string" required>
+  Progress correlation ID.
+</ParamField>
+<ParamField body="sourcePath" type="string" required>
+  Absolute path to the source video.
+</ParamField>
+<ParamField body="outputPath" type="string" required>
+  Absolute path for the cut output.
+</ParamField>
+<ParamField body="startSeconds" type="number" required>
+  Trim start position in seconds (passed as `-ss`).
+</ParamField>
+<ParamField body="durationSeconds" type="number" required>
+  Duration of the cut in seconds (passed as `-t`).
+</ParamField>
+<ParamField body="clipTitle" type="string">
+  Label shown in progress events.
+</ParamField>
+
+```typescript
+// IPC channel: wzrd:clip-studio:cut-clip
+// Bridge method: window.wzrdDesktop.cutClip(params)
+const result = await bridge.cutClip({
+  operationId: 'cut-001',
+  sourcePath: '/path/to/raw.mp4',
+  outputPath: '/path/to/cut.mp4',
+  startSeconds: 12.5,
+  durationSeconds: 30,
+});
+```
+
+Emits `wzrd:clip-studio:ffmpeg-progress` (not `wzrd:media:progress`). Subscribe with `onFfmpegProgress`.
+
+---
+
+### `wzrd:clip-studio:thumbnail`
+
+Extracts a JPEG thumbnail frame from a clip at a specific timestamp.
+
+```typescript
+// IPC channel: wzrd:clip-studio:generate-thumbnail
+// Bridge method: window.wzrdDesktop.generateThumbnail(params)
+const result = await bridge.generateThumbnail({
+  operationId: 'thumb-001',
+  sourcePath: '/path/to/video.mp4',
+  outputPath: '/path/to/thumb.jpg',
+  atSeconds: 5.0,
+});
+```
+
+<ResponseField name="outputPath" type="string">
+  Absolute path of the written JPEG file.
+</ResponseField>
+
+---
+
+### `wzrd:clip-studio:export-vertical`
+
+Re-encodes a clip segment to **1080×1920 (9:16)** vertical format. Optionally overlays a branded logo with a timed intro splash and persistent watermark.
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface ExportVerticalClipParams {
+      operationId: string;
+      sourcePath: string;
+      outputPath: string;
+      startSeconds: number;
+      durationSeconds: number;
+      clipTitle?: string;
+      captionsPath?: string;  // .vtt or .srt — burned into the video
+      logoPath?: string;      // PNG/JPG — triggers logo overlay mode
+      logoOpacity?: number;   // 0–1, default 0.5
+      logoIntroSeconds?: number; // Full-size intro duration, default 3 s
+      ffmpegPath?: string;
+    }
+    ```
+  </Tab>
+  <Tab title="FFmpeg filter applied">
+    Without logo:
+    ```
+    scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920
+    [,subtitles='<path>']
+    ```
+
+    With logo:
+    ```
+    [0:v] scale+crop+subtitles → [base]
+    [1:v] split → intro logo (fade in/out) + watermark logo (fade out at end)
+    overlay intro at center for logoIntroSeconds
+    overlay watermark at bottom after intro
+    ```
+  </Tab>
+</Tabs>
+
+Emits `wzrd:clip-studio:ffmpeg-progress`. Subscribe with `onFfmpegProgress`.
+
+---
+
+### `wzrd:clip-studio:youtube-info`
+
+Fetches YouTube video metadata using `yt-dlp --dump-single-json` without downloading the video.
+
+```typescript
+// IPC channel: wzrd:clip-studio:validate-youtube-downloader  (health check)
+const status = await bridge.validateYoutubeDownloaderAvailable({ downloaderPath: '/usr/local/bin/yt-dlp' });
+// → { available: true, version: "yt-dlp 2024.11.18" }
+```
+
+---
+
+### `wzrd:clip-studio:youtube-download`
+
+Downloads a YouTube video to `userData/clipper/imports/`, merges streams to MP4 using `yt-dlp`, and returns the local file path along with video metadata.
+
+<Tabs>
+  <Tab title="Request">
+    ```typescript
+    interface YoutubeDownloadParams {
+      operationId: string;
+      url: string;               // Must be youtube.com or youtu.be
+      downloaderPath?: string;   // Absolute path to yt-dlp binary (default: "yt-dlp")
+      ffmpegPath?: string;       // Passed to yt-dlp via --ffmpeg-location
+    }
+    ```
+  </Tab>
+  <Tab title="Response">
+    ```typescript
+    interface DesktopYoutubeDownloadResult {
+      id: string;                 // YouTube video ID
+      url: string;                // Canonical video URL
+      title: string;
+      uploader?: string;
+      localPath: string;          // Absolute path of the downloaded MP4
+      durationSeconds?: number;
+      size?: number;              // Bytes
+      subtitlePath?: string;      // Path to the .vtt file if captions were found
+      subtitleText?: string;      // Raw VTT content
+      viewmap?: unknown;
+      viewmapStatus?: string;
+    }
+    ```
+  </Tab>
+  <Tab title="Progress Events">
+    Emits `wzrd:clip-studio:youtube-download-progress`. Subscribe with `onYoutubeDownloadProgress`.
+
+    ```typescript
+    interface DesktopYoutubeDownloadProgress {
+      operationId: string;
+      stage: 'starting' | 'downloading' | 'processing' | 'completed' | 'failed';
+      percent: number;     // 0–100 (capped at 94 during download; 95 during post-processing)
+      message: string;
+    }
+    ```
+
+    Stage flow:
+    ```
+    starting (reading metadata)
+    → downloading (0 → 94%)
+    → processing (95% — yt-dlp Merger/VideoRemuxer)
+    → processing (96% — downloading subtitles, best-effort)
+    → completed (100%)
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  yt-dlp targets **1080p MP4 + M4A audio** (`bv*[height=1080][ext=mp4]+ba[ext=m4a]/b[height=1080][ext=mp4]`). Subtitles are downloaded separately in a best-effort pass — failure does not abort the download.
+</Note>
+
+---
+
+### `wzrd:clip-studio:youtube-subtitles`
+
+Downloads English auto-generated or manual subtitles (VTT format) for a YouTube video using `yt-dlp --write-auto-subs --write-subs --skip-download`. Called internally by `wzrd:clip-studio:youtube-download` — you rarely need to call this directly.
+
+---
+
+### `wzrd:clip-studio:ffmpeg-progress` — Push Event
+
+Emitted during Clip Studio FFmpeg operations (cut, export-vertical, generate-thumbnail). Subscribe with `window.wzrdDesktop.onFfmpegProgress(callback)`.
+
+```typescript
+interface DesktopFfmpegProgress {
+  operationId: string;
+  stage: 'starting' | 'running' | 'completed' | 'failed';
+  percent: number;
+  clipTitle?: string;
+  sourceName?: string;
+  outputName?: string;
+  timeSeconds?: number;
+  message: string;
+  detail?: string;
+  exitCode?: number;
+  signal?: string;
+  stderrTail?: string;
+}
+```
+
+---
+
+## `wzrd:media-file-access` — File Picker & Filesystem Channels
+
+These channels provide native file system access from the renderer, including dialog-based file selection and path resolution.
+
+### `wzrd:clip-studio:select-video-file`
+
+Opens a macOS native file picker filtered to video types (`mp4`, `mov`, `m4v`, `webm`, `mkv`, `avi`). The selected path is automatically added to the media access allow-list.
+
+```typescript
+// Bridge method: window.wzrdDesktop.selectVideoFile()
+const file = await bridge.selectVideoFile();
+// → { name: 'interview.mp4', path: '/Users/alice/Desktop/interview.mp4', size: 123456789 }
+// → null if cancelled
+```
+
+<ResponseField name="name" type="string">Basename of the selected file.</ResponseField>
+<ResponseField name="path" type="string">Absolute path of the selected file.</ResponseField>
+<ResponseField name="size" type="number">File size in bytes.</ResponseField>
+
+---
+
+### `wzrd:clip-studio:select-logo-file`
+
+Opens a native file picker for PNG/JPG/WEBP images. The selected image is copied into `userData/clipper/branding/` and the copied path is returned.
+
+```typescript
+const logo = await bridge.selectLogoFile();
+// → { name: 'logo.png', path: '.../branding/logo.png' }
+```
+
+---
+
+### `wzrd:clip-studio:select-image-files`
+
+Opens a native file picker that supports multi-select for PNG/JPG/WEBP images (used for heatmap screenshots).
+
+```typescript
+const images = await bridge.selectImageFiles();
+// → [{ name: 'screen1.png', path: '...' }, { name: 'screen2.png', path: '...' }]
+// → [] if cancelled
+```
+
+---
+
+### `wzrd:clip-studio:select-export-folder`
+
+Opens a native directory picker. Returns the selected path or `null` if cancelled.
+
+```typescript
+const folder = await bridge.selectExportFolder();
+// → '/Users/alice/Movies/exports'
+```
+
+---
+
+### `wzrd:clip-studio:reveal-in-finder`
+
+Reveals a file or folder in the macOS Finder using `shell.showItemInFolder`.
+
+```typescript
+await bridge.revealInFinder('/Users/alice/Movies/exports/clip.mp4');
+```
+
+---
+
+## `wzrd:qcut:*` — QCut Bridge Channels
+
+The QCut bridge is exposed on `window.wzrdQcut`. It serves WZRD's AI editor engine with FFmpeg CLI sessions, PTY terminal management, project folder operations, and skill management.
+
+### FFmpeg Namespace (`wzrd:qcut:ffmpeg:*`)
+
+<Accordion title="wzrd:qcut:ffmpeg:get-path">
+  Returns the resolved absolute path to the `ffmpeg` binary. Throws if FFmpeg is unavailable.
+
+  ```typescript
+  const ffmpegPath = await window.wzrdQcut.ffmpeg.getPath();
+  // → "/opt/homebrew/bin/ffmpeg"
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:check-health">
+  Returns a health snapshot for the FFmpeg toolchain.
+
+  ```typescript
+  interface FfmpegHealthResult {
+    ffmpegOk: boolean;
+    ffprobeOk: boolean;
+    ffmpegVersion: string;    // e.g. "ffmpeg version 7.1"
+    ffmpegPath: string;
+    ffprobePath: string;
+    errors: string[];         // Non-empty only if not ok
+  }
+
+  const health = await window.wzrdQcut.ffmpeg.checkHealth();
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:create-export-session">
+  Creates a scoped temp directory under `app.getPath('temp')/wzrd-qcut/export/<sessionId>/` with `frames/`, `output/`, `stickers/`, and `temp-media/` sub-directories. The session ID is used in subsequent calls.
+
+  ```typescript
+  const { sessionId, framesDir } = await window.wzrdQcut.ffmpeg.createExportSession();
+  ```
+
+  <ResponseField name="sessionId" type="string">Opaque session identifier.</ResponseField>
+  <ResponseField name="framesDir" type="string">Absolute path to the frames directory for `saveFrame` calls.</ResponseField>
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:save-frame">
+  Writes a single PNG frame to the session's `frames/` directory.
+
+  ```typescript
+  await window.wzrdQcut.ffmpeg.saveFrame({
+    sessionId,
+    frameNumber: 42,
+    imageData: uint8ArrayFromCanvas,
+  });
+  // → { success: true }
+  ```
+
+  The filename is zero-padded: `frame-0042.png`.
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:save-sticker-for-export">
+  Writes a sticker image (PNG or WEBP) to the session's `stickers/` directory. Sticker IDs are sanitized to safe filenames.
+
+  ```typescript
+  await window.wzrdQcut.ffmpeg.saveStickerForExport({
+    sessionId,
+    stickerId: 'emoji-fire',
+    imageData: uint8Array,
+    format: 'png',
+  });
+  // → { success: true, path: '.../stickers/emoji-fire.png' }
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:export-video-cli">
+  Runs FFmpeg to composite frames, images, stickers, text overlays, and audio into a final MP4. The full options object maps to the internal `buildFFmpegArgs` function, which supports:
+
+  - **Composite mode** (default) — scale + pad + filter chain + audio mix
+  - **Direct copy mode** (`useDirectCopy: true`) — concat without re-encoding
+
+  ```typescript
+  interface ExportVideoOptions {
+    sessionId: string;
+    width: number;
+    height: number;
+    fps: number;
+    duration: number;
+    quality?: 'high' | 'medium' | 'low';  // default: 'medium'
+    // Video source (one of):
+    useVideoInput?: boolean;
+    videoInputPath?: string;
+    videoSources?: Array<{ path: string; trimStart?: number; trimEnd?: number }>;
+    // Overlays:
+    filterChain?: string;
+    textFilterChain?: string;
+    imageFilterChain?: string;
+    imageSources?: Array<{ path: string; duration: number }>;
+    stickerFilterChain?: string;
+    stickerSources?: Array<{ path: string; endTime: number }>;
+    // Audio:
+    audioFiles?: Array<{ path: string; startTime?: number; volume?: number }>;
+    // Direct copy:
+    useDirectCopy?: boolean;
+  }
+
+  const result = await window.wzrdQcut.ffmpeg.exportVideoCLI({
+    sessionId,
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    duration: 15,
+    quality: 'high',
+    videoInputPath: '/path/to/base.mp4',
+  });
+  // → { success: true, outputFile: '.../output/output.mp4' }
+  // → { success: false, error: '...', detail: '...' }
+  ```
+
+  Quality presets map to `libx264` CRF values:
+
+  | Quality | CRF | Preset |
+  |---|---|---|
+  | `high` | 18 | slow |
+  | `medium` | 23 | fast |
+  | `low` | 28 | veryfast |
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:extract-audio">
+  Extracts the audio track from a video file.
+
+  ```typescript
+  const { audioPath, fileSize } = await window.wzrdQcut.ffmpeg.extractAudio({
+    videoPath: '/path/to/video.mp4',
+    format: 'wav',  // 'wav' (default, PCM 16-bit 16 kHz mono) or 'mp3'
+  });
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:read-output-file">
+  Reads the final exported file as a Buffer, suitable for upload or display.
+
+  ```typescript
+  const buffer = await window.wzrdQcut.ffmpeg.readOutputFile('/path/to/output.mp4');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:cleanup-export-session">
+  Deletes the session directory recursively (best-effort) and removes the session from the in-memory map.
+
+  ```typescript
+  await window.wzrdQcut.ffmpeg.cleanupExportSession(sessionId);
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:ffmpeg:open-frames-folder">
+  Opens the session's `frames/` directory in the macOS Finder.
+
+  ```typescript
+  await window.wzrdQcut.ffmpeg.openFramesFolder(sessionId);
+  ```
+</Accordion>
+
+---
+
+### PTY Namespace (`wzrd:qcut:pty:*`)
+
+PTY sessions are backed by `node-pty` (native binary, excluded from asar). Each session is owned by the renderer that spawned it — the main process rejects write/resize/kill calls from other renderers by comparing `event.sender.id`.
+
+<Accordion title="wzrd:qcut:pty:spawn">
+  Spawns a new pseudo-terminal session.
+
+  ```typescript
+  interface PtySpawnOptions {
+    shell?: string;    // Default: $SHELL or /bin/zsh
+    command?: string;  // If provided, runs as: shell -lc "<command>"
+    cwd?: string;      // Default: app.getPath('home')
+    cols?: number;     // Default: 80
+    rows?: number;     // Default: 24
+    env?: Record<string, string>;  // Merged with process.env
+  }
+
+  const { success, sessionId } = await window.wzrdQcut.pty.spawn({
+    command: 'python3 -c "print(42)"',
+    cwd: '/Users/alice/project',
+    cols: 120,
+    rows: 30,
+  });
+  ```
+
+  <ResponseField name="success" type="boolean">Whether the PTY spawned successfully.</ResponseField>
+  <ResponseField name="sessionId" type="string">UUID to use in subsequent `write`, `resize`, and `kill` calls.</ResponseField>
+</Accordion>
+
+<Accordion title="wzrd:qcut:pty:write">
+  Sends raw input to an active PTY session.
+
+  ```typescript
+  await window.wzrdQcut.pty.write(sessionId, 'ls -la\n');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:pty:resize">
+  Resizes the PTY to new column/row dimensions. Call this when the terminal UI container is resized.
+
+  ```typescript
+  await window.wzrdQcut.pty.resize(sessionId, 132, 40);
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:pty:kill">
+  Kills a specific PTY session and removes it from the session map.
+
+  ```typescript
+  await window.wzrdQcut.pty.kill(sessionId);
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:pty:kill-all">
+  Kills all PTY sessions owned by the calling renderer.
+
+  ```typescript
+  await window.wzrdQcut.pty.killAll();
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:pty:data — Push Event">
+  Emitted by the main process whenever the PTY produces output. Subscribe with `window.wzrdQcut.pty.onData(cb)`.
+
+  ```typescript
+  const unsubscribe = window.wzrdQcut.pty.onData(({ sessionId, data }) => {
+    terminalElement.write(data);
+  });
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:pty:exit — Push Event">
+  Emitted when a PTY process exits. The session is removed from the map before this fires.
+
+  ```typescript
+  const unsubscribe = window.wzrdQcut.pty.onExit(({ sessionId, exitCode }) => {
+    console.log(`PTY ${sessionId} exited with code ${exitCode}`);
+  });
+  ```
+</Accordion>
+
+---
+
+### Project Folder Namespace (`wzrd:qcut:project-folder:*`)
+
+Each project gets an isolated directory under `userData/qcut-projects/<sanitized-projectId>/` with `media/`, `skills/`, and `exports/` sub-directories created on first access.
+
+<Accordion title="wzrd:qcut:project-folder:get-root">
+  Returns the absolute root path for a project, creating the directory structure if needed.
+
+  ```typescript
+  const rootPath = await window.wzrdQcut.projectFolder.getRoot('my-project-id');
+  // → "/Users/alice/Library/Application Support/WZRD Studio/qcut-projects/my-project-id"
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:project-folder:list">
+  Lists immediate children of a project sub-path, sorted with directories first.
+
+  ```typescript
+  interface DirectoryEntry {
+    name: string;
+    path: string;
+    relativePath: string;
+    type: 'video' | 'audio' | 'image' | 'unknown';
+    size: number;
+    modifiedAt: number;   // Unix ms
+    isDirectory: boolean;
+  }
+
+  const entries = await window.wzrdQcut.projectFolder.list('my-project-id', 'media');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:project-folder:scan">
+  Recursively (or shallowly) scans a project sub-path for media files.
+
+  ```typescript
+  interface ScanOptions {
+    recursive?: boolean;   // Default: false
+    mediaOnly?: boolean;   // If true, skips files with unrecognised extensions
+  }
+
+  interface ScanResult {
+    files: DirectoryEntry[];
+    folders: string[];      // Relative paths of all discovered sub-directories
+    totalSize: number;      // Bytes
+    scanTime: number;       // Milliseconds taken
+  }
+
+  const result = await window.wzrdQcut.projectFolder.scan('my-project-id', '', {
+    recursive: true,
+    mediaOnly: true,
+  });
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:project-folder:ensure-structure">
+  Creates the standard directory structure (`media/`, `skills/`, `exports/`) without returning a value. Safe to call multiple times.
+
+  ```typescript
+  await window.wzrdQcut.projectFolder.ensureStructure('my-project-id');
+  ```
+</Accordion>
+
+---
+
+### Skills Namespace (`wzrd:qcut:skills:*`)
+
+Skills are Markdown files (`Skill.md`) stored in `qcut-projects/<id>/skills/<skill-folder>/`. They carry YAML frontmatter with `name`, `description`, and optional `dependencies` fields. Bundled skills are copied on first access and can be synced to `~/.claude/skills/` for the Claude CLI.
+
+<Accordion title="wzrd:qcut:skills:list">
+  Returns all installed skills for a project, installing bundled defaults on first call.
+
+  ```typescript
+  interface Skill {
+    id: string;            // Folder name
+    name: string;
+    description: string;
+    dependencies?: string;
+    folderName: string;
+    mainFile: 'Skill.md';
+    additionalFiles: string[];
+    content: string;       // Full normalized Skill.md content
+    createdAt: number;
+    updatedAt: number;
+  }
+
+  const skills = await window.wzrdQcut.skills.list('my-project-id');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:skills:import">
+  Copies a skill folder from an arbitrary source path into the project's `skills/` directory.
+
+  ```typescript
+  const skill = await window.wzrdQcut.skills.import('my-project-id', '/path/to/my-skill-folder');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:skills:delete">
+  Removes a skill folder from the project. The skill ID must not contain path separators.
+
+  ```typescript
+  await window.wzrdQcut.skills.delete('my-project-id', 'color-grading-skill');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:skills:get-content">
+  Reads the content of a specific file within a skill folder.
+
+  ```typescript
+  const content = await window.wzrdQcut.skills.getContent('my-project-id', 'color-grading-skill', 'Skill.md');
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:skills:sync-for-claude">
+  Syncs all project skills to `~/.claude/skills/` with a `wzrd-qcut-<projectId>-` prefix, making them available to the Claude CLI. Stale previously-synced skills are removed.
+
+  ```typescript
+  const result = await window.wzrdQcut.skills.syncForClaude('my-project-id');
+  // → { synced: true, copied: 3, skipped: 1, removed: 0, warnings: [] }
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:skills:scan-global">
+  Scans both `~/.claude/skills/` and the app's bundled skills directory, returning metadata for all discovered skill folders.
+
+  ```typescript
+  const available = await window.wzrdQcut.skills.scanGlobal();
+  // → [{ path, name, description, bundled: false }, ...]
+  ```
+</Accordion>
+
+---
+
+### Agent Command Channel (`wzrd:qcut:agent-command`)
+
+A bidirectional channel for agent API communication. The renderer registers itself as ready, then the main process (via the MCP server bridge) can dispatch editor commands that the renderer executes and responds to.
+
+<CodeGroup>
+  ```typescript Renderer — register handler
+  // Notify main process that the renderer is ready to receive commands
+  window.wzrdQcut.agentCommand.notifyReady({ projectId: 'my-project' });
+
+  // Listen for incoming agent commands
+  const unsubscribe = window.wzrdQcut.agentCommand.onRequest((command) => {
+    const result = executeEditorCommand(command);
+    window.wzrdQcut.agentCommand.respond({ commandId: command.id, result });
+  });
+  ```
+
+  ```typescript Renderer — cleanup
+  // Remove listeners when the component unmounts
+  window.wzrdQcut.agentCommand.removeListeners();
+  ```
+</CodeGroup>
+
+<Warning>
+  Agent commands originate from the MCP server running locally in the main process. They should be validated before execution — the `onRequest` callback is the permission gate between the agent API and the renderer's editor state.
+</Warning>
+
+---
+
+## MCP Server (`wzrd:qcut:mcp:*`)
+
+<Accordion title="wzrd:qcut:mcp:get-info">
+  Returns connection info for the local MCP server started by `setupQcutMcpServer`.
+
+  ```typescript
+  const info = await window.wzrdQcut.mcp.getInfo();
+  ```
+</Accordion>
+
+<Accordion title="wzrd:qcut:mcp:app-html — Push Event">
+  Emitted by the MCP server when it needs to pass rendered HTML to the renderer process.
+
+  ```typescript
+  const unsubscribe = window.wzrdQcut.mcp.onAppHtml((payload) => {
+    // Handle HTML payload from agent
+  });
+  ```
+</Accordion>
+
+---
+
+## Channel Quick Reference
+
+| Channel | Bridge object | Method | Direction | Progress event |
+|---|---|---|---|---|
+| `wzrd:media:probe` | `wzrdDesktop` | `probeMedia` | invoke | — |
+| `wzrd:media:extract-thumbnail` | `wzrdDesktop` | `extractThumbnail` | invoke | `wzrd:media:progress` |
+| `wzrd:media:extract-waveform-peaks` | `wzrdDesktop` | `extractWaveformPeaks` | invoke | `wzrd:media:progress` |
+| `wzrd:media:render-preview-proxy` | `wzrdDesktop` | `renderPreviewProxy` | invoke | `wzrd:media:progress` |
+| `wzrd:media:render-timeline` | `wzrdDesktop` | `renderTimeline` | invoke | `wzrd:media:progress` |
+| `wzrd:media:cache-remote` | `wzrdDesktop` | `cacheRemoteMedia` | invoke | `wzrd:media:progress` |
+| `wzrd:media:cut` | `wzrdDesktop` | `cutMedia` | invoke | `wzrd:media:progress` |
+| `wzrd:media:run-studio-action` | `wzrdDesktop` | `runStudioMediaAction` | invoke | `wzrd:media:progress` |
+| `wzrd:media:validate-toolchain` | `wzrdDesktop` | `validateMediaToolchain` | invoke | — |
+| `wzrd:media:progress` | `wzrdDesktop` | `onMediaProgress` | push | — |
+| `wzrd:clip-studio:get-video-metadata` | `wzrdDesktop` | `getVideoMetadata` | invoke | — |
+| `wzrd:clip-studio:cut-clip` | `wzrdDesktop` | `cutClip` | invoke | `wzrd:clip-studio:ffmpeg-progress` |
+| `wzrd:clip-studio:export-vertical-clip` | `wzrdDesktop` | `exportVerticalClip` | invoke | `wzrd:clip-studio:ffmpeg-progress` |
+| `wzrd:clip-studio:generate-thumbnail` | `wzrdDesktop` | `generateThumbnail` | invoke | `wzrd:clip-studio:ffmpeg-progress` |
+| `wzrd:clip-studio:download-youtube-video` | `wzrdDesktop` | `downloadYoutubeVideo` | invoke | `wzrd:clip-studio:youtube-download-progress` |
+| `wzrd:clip-studio:extract-representative-frames` | `wzrdDesktop` | `extractRepresentativeFrames` | invoke | — |
+| `wzrd:clip-studio:select-video-file` | `wzrdDesktop` | `selectVideoFile` | invoke | — |
+| `wzrd:clip-studio:select-export-folder` | `wzrdDesktop` | `selectExportFolder` | invoke | — |
+| `wzrd:clip-studio:resolve-media-file-url` | `wzrdDesktop` | `resolveMediaFileUrl` | invoke | — |
+| `wzrd:clip-studio:ffmpeg-progress` | `wzrdDesktop` | `onFfmpegProgress` | push | — |
+| `wzrd:clip-studio:youtube-download-progress` | `wzrdDesktop` | `onYoutubeDownloadProgress` | push | — |
+| `wzrd:qcut:ffmpeg:get-path` | `wzrdQcut.ffmpeg` | `getPath` | invoke | — |
+| `wzrd:qcut:ffmpeg:check-health` | `wzrdQcut.ffmpeg` | `checkHealth` | invoke | — |
+| `wzrd:qcut:ffmpeg:create-export-session` | `wzrdQcut.ffmpeg` | `createExportSession` | invoke | — |
+| `wzrd:qcut:ffmpeg:save-frame` | `wzrdQcut.ffmpeg` | `saveFrame` | invoke | — |
+| `wzrd:qcut:ffmpeg:export-video-cli` | `wzrdQcut.ffmpeg` | `exportVideoCLI` | invoke | — |
+| `wzrd:qcut:pty:spawn` | `wzrdQcut.pty` | `spawn` | invoke | — |
+| `wzrd:qcut:pty:write` | `wzrdQcut.pty` | `write` | invoke | — |
+| `wzrd:qcut:pty:resize` | `wzrdQcut.pty` | `resize` | invoke | — |
+| `wzrd:qcut:pty:kill` | `wzrdQcut.pty` | `kill` | invoke | — |
+| `wzrd:qcut:pty:data` | `wzrdQcut.pty` | `onData` | push | — |
+| `wzrd:qcut:pty:exit` | `wzrdQcut.pty` | `onExit` | push | — |
+| `wzrd:qcut:project-folder:get-root` | `wzrdQcut.projectFolder` | `getRoot` | invoke | — |
+| `wzrd:qcut:project-folder:list` | `wzrdQcut.projectFolder` | `list` | invoke | — |
+| `wzrd:qcut:project-folder:scan` | `wzrdQcut.projectFolder` | `scan` | invoke | — |
+| `wzrd:qcut:skills:list` | `wzrdQcut.skills` | `list` | invoke | — |
+| `wzrd:qcut:skills:import` | `wzrdQcut.skills` | `import` | invoke | — |
+| `wzrd:qcut:skills:sync-for-claude` | `wzrdQcut.skills` | `syncForClaude` | invoke | — |
+| `wzrd:qcut:agent-command` | `wzrdQcut.agentCommand` | `onRequest` | push | — |
