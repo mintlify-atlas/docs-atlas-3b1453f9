@@ -318,16 +318,17 @@ The `make_magic` MCP tool orchestrates the entire WZRD pipeline end-to-end, incl
   </Step>
   <Step title="Trigger Director's Cut">
     ```http
-    POST /functions/v1/director-cut
-    { "action": "create", "projectId": "uuid" }
+    POST /functions/v1/directors-cut
+    Content-Type: application/json
+
+    { "project_id": "uuid" }
     ```
   </Step>
   <Step title="Poll until final video">
-    ```http
-    POST /functions/v1/director-cut
-    { "action": "status", "projectId": "uuid", "jobId": "uuid" }
     ```
-    Repeat until `status === 'completed'` and `outputUrl` is present.
+    GET /functions/v1/directors-cut/status?project_id=<uuid>
+    ```
+    Repeat until `final_url` is present in the response.
   </Step>
 </Steps>
 

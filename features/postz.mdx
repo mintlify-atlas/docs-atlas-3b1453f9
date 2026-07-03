@@ -12,7 +12,7 @@ Postz is WZRD Studio's built-in social media command center. Connect your accoun
 
 ## Supported Channels
 
-Postz supports OAuth connections to the following providers. Each provider is labelled and colour-coded in the channel rail and composer.
+Postz supports OAuth connections to the following providers. Each provider is labelled and colour-coded in the channel rail and composer. Providers listed in `POSTZ_PROVIDER_META` (`tiktok`, `instagram`, `youtube`, `x`, `threads`, `linkedin`, `linkedin-page`) have named colour themes; all others inherit a default style.
 
 <CardGroup cols={3}>
   <Card title="TikTok" icon="tiktok">
@@ -104,6 +104,7 @@ The composer groups individual per-channel posts into a **post group** (`group_i
     ```typescript
     type PostzMediaRef = {
       asset_id: string;       // references a ProjectAsset row
+      url?: string;           // direct URL (e.g. from a pre-signed upload)
       cdn_url?: string;       // public CDN URL
       mime_type?: string;
       kind?: "image" | "video" | "gif";

@@ -7,6 +7,12 @@ description: "Complete reference for WZRD Studio's Supabase Edge Functions cover
 WZRD Studio's backend is built entirely on **Supabase Edge Functions** — Deno-based serverless functions deployed at the edge and called directly from the Electron desktop app. Each function handles a focused responsibility: authentication, billing, AI model proxying, asset management, or social publishing. All functions share a common authentication pattern and CORS configuration, and they are addressable at `{VITE_SUPABASE_URL}/functions/v1/{function-name}`.
 
 <Note>
+  **Base URL:** `https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/`
+
+  In the app, this value comes from the `VITE_SUPABASE_URL` environment variable.
+</Note>
+
+<Note>
   All requests require `Authorization: Bearer <supabase-jwt>` unless noted otherwise. Functions return `Content-Type: application/json` for standard responses and `text/event-stream` for SSE endpoints.
 </Note>
 

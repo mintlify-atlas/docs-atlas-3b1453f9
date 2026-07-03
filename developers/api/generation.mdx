@@ -138,7 +138,7 @@ Emitted multiple times per shot as it progresses through phases. Each event repr
   Narrative description / prompt idea text.
 </ResponseField>
 <ResponseField name="visual_prompt" type="string | null">
-  Full enriched visual prompt for image generation (available from `enriching` phase).
+  Full enriched visual prompt for image generation. `null` during `creating` phase; set from `drafting` phase onward.
 </ResponseField>
 <ResponseField name="thumbnail" type="string | null">
   Thumbnail URL (populated after image generation; `null` in the stream itself).
@@ -151,13 +151,13 @@ data: {"id":"shot-uuid","project_id":"...","scene_id":"...","shot_number":3,"sta
 
 <Steps>
   <Step title="creating">
-    Shot row inserted. `title` and `visual_prompt` are `null`.
+    Shot row inserted. `visual_prompt` is `null` in the event payload.
   </Step>
   <Step title="drafting">
-    `prompt_idea` and `shot_type` written to the database. `title` populated.
+    `prompt_idea` and `shot_type` written to the database. `title` and `visual_prompt` are now populated in the event payload.
   </Step>
   <Step title="enriching">
-    `visual_prompt` written; `image_status` set to `prompt_ready`.
+    `visual_prompt` and `image_status: prompt_ready` written to the database.
   </Step>
   <Step title="ready">
     All fields populated. Trigger `onShotReady` in your UI hook to merge the shot into the timeline.
@@ -247,16 +247,6 @@ Content-Type: application/json
   "project_id": "a1b2c3d4-...",
   "phase": "images"
 }
-```
-
-### Progress Stream
-
-Monitor progress in real time by subscribing to the SSE stream:
-
-```
-GET /functions/v1/project-auto-generate/stream?project_id=<project-id>
-Authorization: Bearer <supabase-jwt>
-Accept: text/event-stream
 ```
 
 ---

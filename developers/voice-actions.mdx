@@ -35,7 +35,7 @@ export function VoiceAgentProvider({ children }: { children: React.ReactNode }) 
   const location = useLocation();
   const { isAuthenticated } = useAuth();
 
-  // Register global navigation actions on every route change
+  // Recompute global navigation actions on every route change...
   const globalActions = useMemo(
     () =>
       createGlobalVoiceActions({
@@ -47,6 +47,12 @@ export function VoiceAgentProvider({ children }: { children: React.ReactNode }) 
       }),
     [location.pathname, location.search, navigate, registry],
   );
+
+  // ...and register them, cleaning up the previous set on each route change
+  useEffect(() => {
+    const unregister = globalActions.map((registration) => registry.register(registration));
+    return () => unregister.forEach((fn) => fn());
+  }, [globalActions, registry]);
 
   // Boot the OpenAI Realtime session
   const voiceSession = useWzrdRealtimeSession({ registry });
@@ -61,6 +67,7 @@ export function VoiceAgentProvider({ children }: { children: React.ReactNode }) 
         {showVoiceControl ? (
           <VoiceActionButton
             status={voiceSession.status}
+            errorMessage={voiceSession.errorMessage}
             onPressStart={voiceSession.pushToTalkStart}
             onPressEnd={voiceSession.pushToTalkStop}
             onDisconnect={voiceSession.disconnect}
@@ -147,6 +154,19 @@ Actions that modify state can declare a risk level to require user confirmation 
 type VoiceActionRisk = 'navigation' | 'write' | 'generation' | 'sensitive';
 ```
 
+### VoiceActionConfirmation
+
+When a handler returns `{ status: 'needs_confirmation' }`, the `confirmation` field contains:
+
+```typescript
+interface VoiceActionConfirmation {
+  actionName: VoiceActionName;  // The action that needs confirming
+  risk: VoiceActionRisk;
+  message: string;              // Spoken to the user: "Are you sure you want to…?"
+  input: unknown;               // Original input, echoed back for re-execution
+}
+```
+
 When a `confirmation` is declared in the registration, the registry returns `{ status: 'needs_confirmation' }` on the first call. The agent asks the user to confirm, then re-calls with `context.confirmed = true`.
 
 ## Registering Voice Actions
@@ -189,17 +209,17 @@ interface VoiceActionRegistration<Input = unknown> {
 ```typescript
 import { useRegisterVoiceActions } from '@/voice/VoiceAgentProvider';
 
-function StoryboardPage() {
+function TimelinePage() {
   const { triggerGeneration } = useGeneration();
 
   useRegisterVoiceActions([
     {
-      name: 'generate-storyboard',
-      scope: 'storyboard-page',
-      description: 'Generate all storyboard images for the current project',
+      name: 'timeline_generate_all_images',
+      scope: 'timeline-page',
+      description: 'Generate all shot images for the current project timeline',
       confirmation: {
         risk: 'generation',
-        message: 'This will use credits to generate all storyboard images. Continue?',
+        message: 'This will use credits to generate all shot images. Continue?',
       },
       handler: async (input, context) => {
         if (!context.currentProjectId) {
@@ -213,7 +233,7 @@ function StoryboardPage() {
         return {
           ok: true,
           status: 'completed',
-          message: 'Storyboard generation started.',
+          message: 'Shot image generation started.',
         };
       },
     },
@@ -325,7 +345,7 @@ const sessionInfo = await fetchRealtimeClientSecret();
 ```
 
 <Note>
-  For local development you can set `VITE_OPENAI_API_KEY` in your `.env.local` file to bypass the edge function. In production, keys must route through the `realtime-client-secret` Supabase Function — never expose service tokens in the renderer.
+  The API key is never passed directly from the client. `useWzrdRealtimeSession` always calls the `realtime-client-secret` Supabase Edge Function to obtain a short-lived ephemeral key — never expose your OpenAI service key in the renderer process.
 </Note>
 
 ## VoiceSelectionContext

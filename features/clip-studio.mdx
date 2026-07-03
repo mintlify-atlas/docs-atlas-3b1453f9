@@ -135,7 +135,7 @@ export function isSupportedYoutubeUrl(rawUrl: string): boolean {
     `buildYoutubeDownloadArgs({ url, outputTemplate, ffmpegPath })` uses the format selector `bv*[height=1080][ext=mp4]+ba[ext=m4a]/b[height=1080][ext=mp4]` and remuxes to MP4 via FFmpeg.
   </Step>
   <Step title="Extract subtitles">
-    `buildYoutubeSubtitleArgs({ url, outputTemplate })` downloads auto-generated English VTT captions using `--write-auto-subs` and parses them into transcript segments for signal fusion.
+    `buildYoutubeSubtitleArgs({ url, outputTemplate })` downloads English VTT captions using `--write-auto-subs` and `--write-subs` (auto-generated and manual subs) and parses them into transcript segments for signal fusion.
   </Step>
   <Step title="Parse progress">
     `parseYoutubeDownloadProgress(text)` converts yt-dlp's `[download] NN%` lines into structured `{ stage, percent, message }` objects, reporting stages `downloading` (0–94%), `processing` (95%), and `starting` (0%).

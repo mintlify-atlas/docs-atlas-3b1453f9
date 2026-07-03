@@ -14,7 +14,7 @@ WZRD Studio uses the standard Electron three-layer model: a Node.js **main proce
 ┌─────────────────────────────────────────────────────────────────┐
 │  Main Process  (electron/main.js — Node.js / Electron APIs)     │
 │                                                                  │
-│  • Protocol handlers (wzrd://, wzrd-media://)                   │
+│  • Protocol handlers (wzrd://app/, wzrd://media/)               │
 │  • IPC handlers  (ipcMain.handle)                               │
 │  • FFmpeg/ffprobe child processes                               │
 │  • PTY sessions (node-pty)                                      │
@@ -37,7 +37,7 @@ The entry point for the Electron shell. On startup it:
 
 1. Registers the `wzrd://` scheme as privileged before `app.ready` fires.
 2. Applies a custom `userData` path if `WZRD_DESKTOP_USER_DATA_DIR` is set.
-3. Creates a `MediaFileAccess` instance that gates which local paths the renderer may read via the `wzrd-media://` protocol.
+3. Creates a `MediaFileAccess` instance that gates which local paths the renderer may read via the `wzrd://media/` protocol.
 4. Calls `app.whenReady()` to install the application menu, protocol handler, all IPC handlers, and a permission handler (camera/microphone requests are blocked outside trusted app navigation).
 5. Enforces single-instance via `app.requestSingleInstanceLock()` — a second launch routes any deep-link argument to the existing window.
 
@@ -73,22 +73,22 @@ The preload script uses Electron's `contextBridge` to expose two globals to the 
       platform: string;
       openExternal: (url: string) => Promise<boolean>;
       getDeepLink: (path: string) => string;
-      // Media
-      probeMedia: (params: { filePath: string; ffmpegPath?: string }) => Promise<DesktopVideoMetadata>;
-      extractThumbnail: (params: { operationId: string; sourcePath: string; outputPath: string; atMs: number }) => Promise<{ outputPath: string }>;
-      extractWaveformPeaks: (params: { operationId: string; sourcePath: string; resolution?: number; sampleRate?: number }) => Promise<{ peaks: number[] }>;
-      renderPreviewProxy: (params: { operationId: string; sourcePath: string; outputPath: string }) => Promise<{ outputPath: string }>;
-      renderTimeline: (params: { operationId: string; timeline: LocalTimelineRenderPlan; outputPath: string }) => Promise<{ outputPath: string }>;
-      runStudioMediaAction: (params: { operationId: string; actionId: string; outputFolder: string }) => Promise<{ outputPath?: string; outputs?: Array<{ type: string; path?: string }> }>;
-      cacheRemoteMedia: (params: { operationId: string; url: string; name?: string }) => Promise<{ path: string; mediaUrl: string }>;
-      // Clip Studio
-      cutClip: (params: { operationId: string; sourcePath: string; outputPath: string; startSeconds: number; durationSeconds: number }) => Promise<{ outputPath: string }>;
-      exportVerticalClip: (params: { operationId: string; sourcePath: string; outputPath: string }) => Promise<{ outputPath: string }>;
-      downloadYoutubeVideo: (params: { operationId: string; url: string }) => Promise<DesktopYoutubeDownloadResult>;
-      // Progress subscriptions (return unsubscribe fn)
-      onFfmpegProgress: (cb: (p: DesktopFfmpegProgress) => void) => () => void;
-      onMediaProgress: (cb: (p: DesktopFfmpegProgress) => void) => () => void;
-      onYoutubeDownloadProgress: (cb: (p: DesktopYoutubeDownloadProgress) => void) => () => void;
+      // Media (all optional — check before calling)
+      probeMedia?: (params: { filePath: string; ffmpegPath?: string }) => Promise<DesktopVideoMetadata>;
+      extractThumbnail?: (params: { operationId: string; sourcePath: string; outputPath: string; atMs: number }) => Promise<{ outputPath: string }>;
+      extractWaveformPeaks?: (params: { operationId: string; sourcePath: string; resolution?: number; sampleRate?: number }) => Promise<{ peaks: number[] }>;
+      renderPreviewProxy?: (params: { operationId: string; sourcePath: string; outputPath: string }) => Promise<{ outputPath: string }>;
+      renderTimeline?: (params: { operationId: string; timeline: LocalTimelineRenderPlan; outputPath: string }) => Promise<{ outputPath: string }>;
+      runStudioMediaAction?: (params: { operationId: string; actionId: string; outputFolder: string }) => Promise<{ outputPath?: string; outputs?: Array<{ type: string; path?: string }> }>;
+      cacheRemoteMedia?: (params: { operationId: string; url: string; name?: string }) => Promise<{ path: string; mediaUrl: string }>;
+      // Clip Studio (all optional)
+      cutClip?: (params: { operationId: string; sourcePath: string; outputPath: string; startSeconds: number; durationSeconds: number }) => Promise<{ outputPath: string }>;
+      exportVerticalClip?: (params: { operationId: string; sourcePath: string; outputPath: string }) => Promise<{ outputPath: string }>;
+      downloadYoutubeVideo?: (params: { operationId: string; url: string }) => Promise<DesktopYoutubeDownloadResult>;
+      // Progress subscriptions (return unsubscribe fn; all optional)
+      onFfmpegProgress?: (cb: (p: DesktopFfmpegProgress) => void) => () => void;
+      onMediaProgress?: (cb: (p: DesktopFfmpegProgress) => void) => () => void;
+      onYoutubeDownloadProgress?: (cb: (p: DesktopYoutubeDownloadProgress) => void) => () => void;
     }
     ```
   </Tab>
@@ -346,7 +346,7 @@ Two helper utilities are also exported:
 
 ## Agent Relay — `packages/wzrd-agent-relay/`
 
-A Cloudflare Worker at `packages/wzrd-agent-relay/src/index.ts` acts as a WebSocket relay for agent PTY sessions. It uses Cloudflare Durable Objects (`WzrdAgentPtySession`) to maintain session state and authenticates via a JWT verified against `DAYTONA_RELAY_JWT_SECRET`.
+A Cloudflare Worker at `packages/wzrd-agent-relay/src/index.ts` acts as a WebSocket relay for agent PTY sessions. It uses Cloudflare Durable Objects (`WzrdAgentPtySession`) to maintain session state, connects to sandboxes via `@daytona/sdk`, and authenticates requests via a JWT verified against `DAYTONA_RELAY_JWT_SECRET`.
 
 ```typescript
 // packages/wzrd-agent-relay/src/index.ts
@@ -383,7 +383,7 @@ WZRD Studio targets macOS Apple Silicon (`arm64`). The build pipeline uses `elec
 bun run desktop:dist:mac
 
 # Outputs:
-# release/wzrdstudiofinal555-apfs.dmg
+# release/wzrdstudiofinal555.dmg
 # release/mac-arm64/WZRD Studio.app
 ```
 
@@ -392,7 +392,7 @@ Key build settings:
 | Setting | Value |
 |---|---|
 | App ID | `com.wzrd.studio` |
-| DMG artifact | `wzrdstudiofinal555-apfs.dmg` |
+| DMG artifact | `wzrdstudiofinal555.dmg` |
 | Target arch | `arm64` |
 | asar | `true` |
 | `asarUnpack` | `node_modules/node-pty/**` |

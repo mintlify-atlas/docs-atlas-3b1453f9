@@ -1,53 +1,5 @@
 ---
-<<<<<<< HEAD
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
----
-
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
-
-<Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
-
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
-
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
-
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
-
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
-=======
-title: "Get Started with WZRD Studio in 5 Minutes"
+title: "Get Started with WZRD Studio: First Video in 5 Minutes"
 sidebarTitle: "Quickstart"
 description: "Create your first AI video project in WZRD Studio: set up credentials, launch the app, generate a storyboard, and export your first clip."
 ---
@@ -60,99 +12,79 @@ This guide takes you from a fresh install to your first exported AI video clip. 
 
 <Steps>
   <Step title="Install WZRD Studio">
-    If you haven't installed the app yet, follow the [Installation guide](/installation) to:
-    - Download and mount `wzrdstudiofinal555-apfs.dmg`.
-    - Drag **WZRD Studio.app** to Applications.
-    - Bypass Gatekeeper on first launch.
-
-    Come back here once the app opens successfully.
+    If you haven't installed the app yet, follow the [Installation guide](/installation) to download and mount `wzrdstudiofinal555-apfs.dmg`, drag **WZRD Studio.app** to Applications, and bypass Gatekeeper on first launch.
   </Step>
 
-  <Step title="Configure your environment variables">
-    Create a `.env` file in the project root (required for development mode; bundled builds read from the built-in configuration):
+  <Step title="Configure environment variables">
+    Create a `.env` file in the project root for development mode:
 
     ```bash
-    # .env
     VITE_SUPABASE_URL=https://<project-ref>.supabase.co
     VITE_SUPABASE_ANON_KEY=<your-supabase-anon-key>
     VITE_THIRDWEB_CLIENT_ID=<your-thirdweb-client-id>
     ```
 
-    Find these values in:
-    - **Supabase** → Project Settings → API → Project URL and anon/public key.
-    - **Thirdweb** → [dashboard.thirdweb.com](https://thirdweb.com/dashboard) → your project → Client ID.
+    Find these in Supabase → Project Settings → API, and Thirdweb dashboard → your project → Client ID.
 
     <Warning>
-      Never commit your `.env` file to version control. The `.gitignore` already excludes it, but double-check before pushing to a shared repository.
+      Never commit your `.env` file to version control. It is already excluded by `.gitignore`.
     </Warning>
   </Step>
 
   <Step title="Launch the app">
-    **From the DMG install:**
-    Open **WZRD Studio.app** from your Applications folder. If macOS blocks the launch, right-click the app icon and select **Open**.
+    From the DMG install, open **WZRD Studio.app** from Applications. If macOS blocks the launch, right-click and select **Open**.
 
-    **From source (development mode):**
+    From source in development mode:
+
     ```bash
     bun run desktop:dev
     ```
-    This starts both the Vite dev server and the Electron shell with live reload enabled. The app window opens automatically once the renderer is ready.
+
+    This starts the Vite dev server and Electron shell together. The app window opens automatically.
   </Step>
 
   <Step title="Sign in and create a project">
-    1. On the login screen, connect your wallet using one of the available methods — Google, Apple, Discord, email, passkey, or phone — via the Thirdweb in-app wallet.
-    2. The app exchanges your wallet token for a Supabase session automatically. You'll be redirected to the **Home dashboard** once authenticated.
-    3. Click **New Project** on the Home dashboard.
-    4. Give your project a name and optionally add a brief description or logline. Click **Create**.
+    On the login screen, connect your wallet via Thirdweb — Google, Apple, Discord, email, passkey, or phone. The app exchanges your wallet token for a Supabase session and redirects you to the Home dashboard.
 
-    You'll land on the **Studio Canvas** — a node-based workspace where your project lives.
+    Click **New Project**, enter a name, and click **Create**. You'll land on the Studio Canvas.
   </Step>
 
   <Step title="Generate storyboard shots">
-    1. In the Studio Canvas, click **Add Node** (or press `N`) and select **Storyboard Shot**.
-    2. Type a prompt describing your first shot — for example: *"Wide establishing shot of a neon-lit Tokyo alley at dusk, cinematic, 4K."*
-    3. Click **Generate**. WZRD Studio sends the prompt to the configured AI provider and returns a visual panel for that shot.
-    4. Repeat for each shot in your sequence. Drag nodes to arrange them spatially — left to right typically maps to chronological order.
+    Navigate to the Storyboard page (`/projects/:projectId/timeline`). Add a new scene and write a prompt for your first shot. Click **Generate** to kick off AI image generation via the `gen-shots` edge function.
+
+    Repeat for each shot. Use **Auto-Generate** to queue all pending shots at once — the app processes them with adaptive concurrency, so multiple shots run in parallel without overwhelming the generation backend.
 
     <Tip>
-      Connect nodes by dragging from the output handle of one storyboard shot to the input handle of the next. This wires the narrative flow and lets Director's Cut assemble shots in the correct order automatically.
+      Check your credit balance before bulk generation. Each shot image and video has a credit cost — see [Credits](/concepts/credits) for the full cost table.
     </Tip>
   </Step>
 
   <Step title="Run Director's Cut">
-    Once you have at least two connected storyboard shots:
-
-    1. Click **Director's Cut** in the top toolbar (or press `Cmd + D`).
-    2. WZRD Studio analyzes the node graph, sequences your shots, proposes transitions, and generates a rough cut.
-    3. A preview of the assembled cut appears in the Director's Cut panel. Review the proposed sequence and adjust any transition types or durations inline.
-    4. Click **Accept Cut** to promote the rough cut to the Video Editor.
-
-    Director's Cut reads the wired connections between your nodes, so shots that aren't connected may be excluded from the assembly. Make sure your narrative flow is fully wired before running.
+    Once shots are generated, open the Director's Cut page (`/projects/:projectId/directors-cut`). Click **Create Cut** to trigger the `director-cut` edge function. WZRD assembles your shots into a final video automatically. Poll job status until the `outputUrl` field is populated in the response.
   </Step>
 
   <Step title="Export from the Video Editor">
-    After accepting the Director's Cut, the **QCut Video Editor** opens with your assembled timeline:
-
-    1. Review the multi-track timeline. Drag clip edges to trim in/out points, or drag clips horizontally to adjust their position.
-    2. Use the waveform view to align cuts to audio beats if you've added a music track.
-    3. When the cut is ready, click **Export** in the top-right corner.
-    4. Choose a resolution, format, and destination folder. Click **Render**.
-
-    The Remotion render pipeline compiles your timeline to a video file and saves it to your chosen location. A system notification appears when rendering is complete.
+    Open the Video Editor (`/projects/:projectId/editor`). The QCut multi-track timeline loads your assembled cut. Trim clips, add titles, adjust audio, then click **Export**. Choose resolution and format and click **Render** — the file is saved locally and attached to your project assets.
 
     <Tip>
-      Your exported clip is also automatically attached to the current project as an asset. You can publish it directly to social channels without leaving the app — open **Postz** from the sidebar to schedule or publish immediately.
+      After export, open **Postz** to schedule the clip for social publishing without leaving the app.
     </Tip>
   </Step>
 </Steps>
 
 ## Next Steps
 
-Now that you've created your first clip, explore the deeper capabilities of each stage:
-
-- **[Studio Canvas](/features/studio-canvas)** — Learn how to build branching node graphs for multi-variant generation.
-- **[Storyboard](/features/storyboard)** — Advanced prompting techniques and shot reference images.
-- **[Director's Cut](/features/directors-cut)** — Customizing assembly rules and transition libraries.
-- **[Video Editor](/features/video-editor)** — QCut keyboard shortcuts, color grading, and audio mixing.
-- **[Postz](/features/postz)** — Connecting social channels and scheduling a publish calendar.
-- **[MCP Server](/developers/mcp-server)** — Automating project workflows with AI coding agents.
->>>>>>> a29bec5 (docs: generate WZRD Studio documentation site)
+<CardGroup cols={2}>
+  <Card title="Studio Canvas" icon="diagram-project" href="/features/studio-canvas">
+    Build branching node graphs for multi-variant AI generation pipelines.
+  </Card>
+  <Card title="Video Editor" icon="scissors" href="/features/video-editor">
+    QCut keyboard shortcuts, export engines, and the agent command API.
+  </Card>
+  <Card title="MCP Server" icon="robot" href="/developers/mcp-server">
+    Automate entire WZRD workflows using AI agents and MCP tools.
+  </Card>
+  <Card title="Agent Skills" icon="wand-magic-sparkles" href="/developers/agent-skills">
+    Composable automation tasks for generation, billing, and editing.
+  </Card>
+</CardGroup>

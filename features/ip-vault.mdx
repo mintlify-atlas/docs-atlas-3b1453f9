@@ -12,7 +12,7 @@ IP Vault is WZRD Studio's on-chain rights registry. Every image, video, audio cl
 
 ## How It Works
 
-IP Vault wraps the `@story-protocol/core-sdk` behind a clean service layer. The `ipVaultService` handles all Supabase interactions, while the `registerVaultItemOnStory` helper (in `src/lib/story/registration`) calls the Story Protocol SDK with a connected wallet. Metadata is pinned to IPFS via the `story-ipfs-metadata` Supabase edge function before any on-chain transaction is submitted.
+IP Vault is built on two layers. The `ipVaultService` (`src/services/ipVaultService.ts`) handles all Supabase database interactions. The `registerVaultItemOnStory` and `claimVaultRevenueOnStory` helpers in `src/lib/story/registration` call the `@story-protocol/core-sdk` directly with a connected wallet. Metadata is pinned to IPFS via the `story-ipfs-metadata` Supabase edge function before any on-chain transaction is submitted.
 
 ```
 WZRD Asset  →  IP Vault Item (draft)  →  IPFS metadata pin
@@ -40,7 +40,7 @@ WZRD Asset  →  IP Vault Item (draft)  →  IPFS metadata pin
     });
     ```
 
-    The service resolves the source record, copies its media URL, thumbnail, and metadata into a new `ip_vault_items` row with `registration_status: "draft"`, and builds an initial **proof packet** capturing provenance.
+    The service resolves the source record, copies its media URL, thumbnail, and metadata into a new `ip_vault_items` row with `registration_status: "draft"`, and builds an initial **proof packet** capturing provenance. The call is idempotent — if the source has already been vaulted, the existing item is returned.
   </Step>
   <Step title="Connect your wallet">
     IP Vault uses the same Thirdweb wallet used for WZRD authentication. Before registering, ensure:
@@ -64,7 +64,7 @@ WZRD Asset  →  IP Vault Item (draft)  →  IPFS metadata pin
     Click **Register** in the IP Inspector panel. IP Vault:
 
     1. Pins metadata (if not already done)
-    2. Marks the item `registering`
+    2. Marks the item `registering` via `ipVaultService.markRegistering()`
     3. Calls `registerVaultItemOnStory(client, item, { walletAddress })` using the Story Protocol SDK
     4. Calls `ipVaultService.persistRegistration()` with the returned `ipId`, `tokenId`, `txHash`, `nftContract`, and `royaltyVaultAddress`
 
@@ -91,19 +91,19 @@ When registering, choose a license profile that defines how others may use your 
 
 <CardGroup cols={2}>
   <Card title="None" icon="lock">
-    All rights reserved. No downstream licensing terms are attached.
+    All rights reserved. No downstream licensing terms are attached. (`none`)
   </Card>
   <Card title="Non-Commercial Social Remix" icon="share-nodes">
-    Allows free remixing for non-commercial, social purposes. No revenue share required.
+    Allows free remixing for non-commercial, social purposes. No revenue share required. (`non_commercial_social_remix`)
   </Card>
   <Card title="Commercial Use" icon="briefcase">
-    Allows commercial use of the IP. A minting fee and revenue share can be configured.
+    Allows commercial use of the IP. A minting fee and revenue share can be configured. (`commercial_use`)
   </Card>
   <Card title="Commercial Remix" icon="code-branch">
-    Allows commercial derivative works. Configurable `commercial_rev_share` (%) and `minting_fee_wip`.
+    Allows commercial derivative works. Configurable `commercial_rev_share` (%) and `minting_fee_wip`. (`commercial_remix`)
   </Card>
   <Card title="Creative Commons Attribution" icon="creative-commons">
-    Free use with attribution required. Maps to the CC BY license framework.
+    Free use with attribution required. Maps to the CC BY license framework. (`creative_commons_attribution`)
   </Card>
 </CardGroup>
 
@@ -166,6 +166,14 @@ The service layer (`src/services/ipVaultService.ts`) handles all database intera
   ```
 </Accordion>
 
+<Accordion title="get(itemId)">
+  Fetches a single vault item by ID. Returns `null` if not found.
+
+  ```typescript
+  const item = await ipVaultService.get(itemId);
+  ```
+</Accordion>
+
 <Accordion title="finalizeSource(input)">
   Resolves the source record (project asset, final asset, blueprint, or generation output), copies its metadata, and creates a `draft` vault item. Idempotent — returns the existing item if the source has already been vaulted.
 
@@ -191,12 +199,20 @@ The service layer (`src/services/ipVaultService.ts`) handles all database intera
   ```
 </Accordion>
 
+<Accordion title="markRegistering(itemId)">
+  Sets `registration_status` to `"registering"`. Called automatically before the on-chain registration transaction is submitted.
+
+  ```typescript
+  await ipVaultService.markRegistering(itemId);
+  ```
+</Accordion>
+
 <Accordion title="pinStoryMetadata(itemId)">
   Calls the `story-ipfs-metadata` edge function to upload IP and NFT metadata to IPFS and writes the resulting URIs and hashes back to the vault item row. Returns a `StoryMetadataPinResult` containing the updated `IPVaultItem`.
 </Accordion>
 
 <Accordion title="persistRegistration(itemId, result)">
-  Writes the on-chain registration result (ip_id, token_id, tx_hash, nft_contract, royalty_vault_address, license_terms_ids) to the vault item and updates `registration_status` to `"registered"`. Also builds a detailed `proof_packet.story` snapshot.
+  Writes the on-chain registration result (`ip_id`, `token_id`, `tx_hash`, `nft_contract`, `royalty_vault_address`, `license_terms_ids`) to the vault item and updates `registration_status` to `"registered"`. Also builds a detailed `proof_packet.story` snapshot.
 </Accordion>
 
 <Accordion title="markRegistrationFailed(itemId, message)">
@@ -228,9 +244,9 @@ Every vault item carries a `proof_packet` JSON object that accumulates provenanc
     "nftContract": "0xdef456...",
     "txHash": "0x789...",
     "explorerUrl": "https://explorer.story.foundation/ipa/0xabc123...",
-    "royaltyVaultAddress": "0xvault...",
-    "registeredAt": "2025-01-15T12:05:00Z"
-  }
+    "royaltyVaultAddress": "0xvault..."
+  },
+  "registeredAt": "2025-01-15T12:05:00Z"
 }
 ```
 

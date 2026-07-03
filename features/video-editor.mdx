@@ -69,7 +69,7 @@ The editor state is backed by `videoEditorStore` (Zustand). Key types from `src/
       trimEnd?: number;        // ms trim from source end
       transition?: ClipTransition;
       effects?: ClipEffect[];
-      masks?: ClipMask[];
+      masks?: ClipMask[];      // 'rectangle' | 'ellipse' | 'custom'
       transforms: {
         position: { x: number; y: number };
         scale: { x: number; y: number };
@@ -112,7 +112,7 @@ Supported clip transitions: `fade`, `dissolve`, `wipe`, `slide`, `zoom`, `blur`,
 
 Supported effects: `blur`, `brightness`, `contrast`, `saturation`, `exposure`, `sharpen`, `grayscale`, `sepia`, `invert`, `vignette`, `grain`, `noise`.
 
-Supported masks: `rectangle`, `ellipse`.
+Supported masks: `rectangle`, `ellipse`, `custom`.
 
 ## Export Engines
 
@@ -178,6 +178,7 @@ window.wzrd.editor.trimElement({ elementId: string; trimStart?: number; trimEnd?
 window.wzrd.editor.moveElement({ elementId: string; startTime: number; trackIndex?: number })
 window.wzrd.editor.deleteElement({ elementId: string })
 window.wzrd.editor.addTrack({ type: 'video' | 'audio' })
+window.wzrd.editor.addText({ content: string; startTime: number; duration: number })
 window.wzrd.editor.setText({ elementId: string; text: string })
 window.wzrd.editor.applyEffect({ elementId: string; effectId: string; params?: Record<string, number> })
 window.wzrd.editor.addCaptionsFromTranscript({ transcript: TranscriptSegment[] })

@@ -177,7 +177,7 @@ Each entry has:
 
   <Steps>
     <Step title="Check credits">
-      Call `get_credits` first. Image generation costs credits per shot; video generation costs more. A project with 20 shots requires credits for all 40 operations.
+      Verify the user has sufficient balance via `GET /functions/v1/billing-portal` before starting. Image generation costs credits per shot; video generation costs more. A project with 20 shots requires credits for all 40 operations.
     </Step>
     <Step title="Run images phase">
       `POST /project-auto-generate` with `phase: "images"`. Poll SSE until all shots report `complete`.
@@ -202,12 +202,9 @@ Each entry has:
   <ParamField body="project_id" type="string" required>
     UUID of the project whose saved compute graph should be executed.
   </ParamField>
-  <ParamField body="auth_token" type="string" required>
-    The user's Supabase JWT (forwarded by the MCP server to the edge function).
-  </ParamField>
 
   ```json
-  { "project_id": "3c7a9e12-...", "auth_token": "eyJ..." }
+  { "project_id": "3c7a9e12-..." }
   ```
 
   ### Event Stream
@@ -231,7 +228,7 @@ Each entry has:
 </Accordion>
 
 <Accordion title="make-magic — End-to-End Project to Director's Cut">
-  The highest-level skill. Accepts a raw concept and format string, creates a project, generates a full storyline, renders all shots, and produces a final Director's Cut video — all in a single automated pipeline. Each step deducts credits; call `get_credits` before starting.
+  The highest-level skill. Accepts a raw concept and format string, creates a project, generates a full storyline, renders all shots, and produces a final Director's Cut video — all in a single automated pipeline. Each step deducts credits; check `/billing/credits` before starting.
 
   **MCP tool:** `make_magic`
 
@@ -282,14 +279,11 @@ Each entry has:
     `"plan"` to upgrade a subscription tier, or `"pack"` to purchase a credit pack.
   </ParamField>
   <ParamField body="code" type="string" required>
-    Plan or pack identifier, e.g. `"pro"`, `"enterprise"`, or `"pack_100"`.
-  </ParamField>
-  <ParamField body="auth_token" type="string" required>
-    The user's Supabase JWT forwarded by the MCP server.
+    Plan or pack identifier, e.g. `"pro"` or `"pack_100"`.
   </ParamField>
 
   ```json
-  { "kind": "plan", "code": "pro", "auth_token": "eyJ..." }
+  { "kind": "plan", "code": "pro" }
   ```
 
   ### Response

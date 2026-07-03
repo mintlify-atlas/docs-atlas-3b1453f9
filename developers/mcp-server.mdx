@@ -30,10 +30,10 @@ curl https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server
   "endpoint": "/functions/v1/mcp-server",
   "tools": [
     "list_models",
-    "get_credits",
-    "create_project",
-    "get_timeline",
+    "start_shot_stream",
+    "render_timeline",
     "run_studio_graph",
+    "make_magic",
     "create_checkout_session",
     "edit_timeline"
   ]
@@ -179,8 +179,8 @@ curl -X POST https://ixkkrousepsiorwlaycp.supabase.co/functions/v1/mcp-server \
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "get_credits",
-      "arguments": { "user_id": "uuid-here" }
+      "name": "list_models",
+      "arguments": { "mediaType": "video" }
     }
   }'
 ```
@@ -224,5 +224,5 @@ The `agents.md` file at the repo root defines what autonomous agents are permitt
 - No direct queries against `auth.users` from clients or Edge Functions.
 
 <Tip>
-  Before calling any generation tool, call `get_credits` first to verify the user has sufficient balance. Generation tools return a `402` with `{ code, required, available, top_up_url }` when credits run out — surface `top_up_url` to the user rather than failing silently.
+  Before calling any generation tool, call `list_models` to confirm the target model exists, then check credit balance via your app's billing endpoint. Generation tools return a `402` with `{ code, required, available, top_up_url }` when credits run out — surface `top_up_url` to the user rather than failing silently.
 </Tip>

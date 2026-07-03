@@ -287,9 +287,9 @@ The file is saved to `userData/media-cache/` with a SHA-256 hash suffix to avoid
 
 ---
 
-### `wzrd:media:resolve-url`
+### `wzrd:clip-studio:resolve-media-file-url`
 
-Validates and resolves a `wzrd://media/?file=…` URL for playback. Returns the URL string if the path is in the allow-list.
+Validates and resolves a local file path into a `wzrd://media/?file=…` playback URL. Returns the URL string if the path is in the allow-list, or throws if it has not been explicitly permitted.
 
 ```typescript
 // IPC channel: wzrd:clip-studio:resolve-media-file-url
@@ -452,14 +452,16 @@ Emits `wzrd:clip-studio:ffmpeg-progress`. Subscribe with `onFfmpegProgress`.
 
 ---
 
-### `wzrd:clip-studio:youtube-info`
+### `wzrd:clip-studio:validate-youtube-downloader`
 
-Fetches YouTube video metadata using `yt-dlp --dump-single-json` without downloading the video.
+Checks whether `yt-dlp` is available on the system by running `yt-dlp --version`. Returns the version string on success.
 
 ```typescript
-// IPC channel: wzrd:clip-studio:validate-youtube-downloader  (health check)
+// IPC channel: wzrd:clip-studio:validate-youtube-downloader
+// Bridge method: window.wzrdDesktop.validateYoutubeDownloaderAvailable(params)
 const status = await bridge.validateYoutubeDownloaderAvailable({ downloaderPath: '/usr/local/bin/yt-dlp' });
 // → { available: true, version: "yt-dlp 2024.11.18" }
+// → { available: false, error: "yt-dlp is unavailable: ..." }
 ```
 
 ---
@@ -525,9 +527,9 @@ Downloads a YouTube video to `userData/clipper/imports/`, merges streams to MP4 
 
 ---
 
-### `wzrd:clip-studio:youtube-subtitles`
-
-Downloads English auto-generated or manual subtitles (VTT format) for a YouTube video using `yt-dlp --write-auto-subs --write-subs --skip-download`. Called internally by `wzrd:clip-studio:youtube-download` — you rarely need to call this directly.
+<Note>
+  Subtitle downloading is handled automatically as part of `wzrd:clip-studio:download-youtube-video`. After the main video download completes, the handler runs `yt-dlp --write-auto-subs --write-subs --skip-download` in a best-effort pass. Failure does not abort the overall download. The `subtitlePath` and `subtitleText` fields in the response contain the results when captions are found.
+</Note>
 
 ---
 
@@ -642,6 +644,7 @@ The QCut bridge is exposed on `window.wzrdQcut`. It serves WZRD's AI editor engi
     ffmpegOk: boolean;
     ffprobeOk: boolean;
     ffmpegVersion: string;    // e.g. "ffmpeg version 7.1"
+    ffprobeVersion: string;
     ffmpegPath: string;
     ffprobePath: string;
     errors: string[];         // Non-empty only if not ok
@@ -1065,6 +1068,7 @@ A bidirectional channel for agent API communication. The renderer registers itse
 | `wzrd:clip-studio:cut-clip` | `wzrdDesktop` | `cutClip` | invoke | `wzrd:clip-studio:ffmpeg-progress` |
 | `wzrd:clip-studio:export-vertical-clip` | `wzrdDesktop` | `exportVerticalClip` | invoke | `wzrd:clip-studio:ffmpeg-progress` |
 | `wzrd:clip-studio:generate-thumbnail` | `wzrdDesktop` | `generateThumbnail` | invoke | `wzrd:clip-studio:ffmpeg-progress` |
+| `wzrd:clip-studio:validate-youtube-downloader` | `wzrdDesktop` | `validateYoutubeDownloaderAvailable` | invoke | — |
 | `wzrd:clip-studio:download-youtube-video` | `wzrdDesktop` | `downloadYoutubeVideo` | invoke | `wzrd:clip-studio:youtube-download-progress` |
 | `wzrd:clip-studio:extract-representative-frames` | `wzrdDesktop` | `extractRepresentativeFrames` | invoke | — |
 | `wzrd:clip-studio:select-video-file` | `wzrdDesktop` | `selectVideoFile` | invoke | — |

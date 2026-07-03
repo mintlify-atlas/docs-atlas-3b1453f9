@@ -31,7 +31,7 @@ Client → sourcify-apify edge function → Apify Actor → Apify Dataset
     Broad YouTube channel, search-result, and playlist scraping. Best default for long-form video metadata. Actor ID: `gXSReGYeawn5nwDhI`.
   </Card>
   <Card title="YouTube Shorts" icon="youtube">
-    Same underlying actor, tuned with `duration: "s"` and `includeShorts: true` for short-form YouTube discovery.
+    Same underlying actor ID (`gXSReGYeawn5nwDhI`), tuned with `duration: "s"` and `includeShorts: true` for short-form YouTube discovery.
   </Card>
   <Card title="YouTube Downloader" icon="download">
     Downloads direct MP4 streams (720p) from individual YouTube watch or Shorts URLs. Only activated when a direct video URL is supplied. Actor ID: `y1IMcEPawMQPafm02`.
@@ -43,7 +43,7 @@ Client → sourcify-apify edge function → Apify Actor → Apify Dataset
     Downloads high-quality Reel media from a direct `/reel/` URL. Actor ID: `Fj1zYgto86GELL443`.
   </Card>
   <Card title="TikTok Fast" icon="tiktok">
-    Hashtags, creator profiles, keyword searches, and direct video URLs. Actor ID configurable via `SOURCIFY_TIKTOK_ACTOR_ID`.
+    Hashtags, creator profiles, keyword searches, and direct video URLs. Uses `SOURCIFY_TIKTOK_ACTOR_ID` env override if set; otherwise falls back to a default actor ID.
   </Card>
   <Card title="Twitch Video" icon="twitch">
     Twitch VOD and clip metadata. Activated when a `twitch.tv` URL is detected. Actor ID: `bqneowjFSQBmAkILW`.
@@ -65,9 +65,9 @@ Client → sourcify-apify edge function → Apify Actor → Apify Dataset
     Press `Cmd+Enter` or click **Plan sources** to proceed.
   </Step>
   <Step title="Review the Codex plan">
-    The `sourcify-apify` function calls the **Codex planner** — an OpenAI Responses API call with a structured JSON schema — to decompose your prompt into 1–5 focused scrape targets. Each target is matched to the most appropriate Apify actors.
+    The `sourcify-apify` function calls the **Codex planner** — an OpenAI Responses API call using a structured JSON schema — to decompose your prompt into 1–5 focused scrape targets. Each target is matched to the most appropriate Apify actors.
 
-    If the Codex planner is unavailable (no API key, or rate-limited), the function falls back to a **deterministic plan** that constructs sensible actor inputs directly from the topic string.
+    The Codex planner requires `OPENAI_API_KEY` to be set on the edge function (the provider defaults to `codex`). If the Codex planner is unavailable or throws, the function falls back to a **deterministic plan** that constructs sensible actor inputs directly from the topic string.
 
     The assistant's explanation of the plan appears as a blue callout below the query box.
   </Step>
@@ -98,7 +98,7 @@ Client → sourcify-apify edge function → Apify Actor → Apify Dataset
     Successfully fetched results are updated in-place with the direct media URL.
 
     <Warning>
-      Fetching MP4s triggers paid Apify actor runs. A maximum of **12 items** are processed per batch to control costs. You can adjust the **Max charge (USD)** setting to cap total Apify spend per scrape session.
+      Fetching MP4s triggers paid Apify actor runs. You can adjust the **Max charge (USD)** setting to cap total Apify spend per scrape session.
     </Warning>
   </Step>
   <Step title="Finalize or add to library">
@@ -140,7 +140,7 @@ The edge function accepts `POST` requests with a JSON body. All actions require 
 
 <Tabs>
   <Tab title="plan">
-    Generates a scraping plan without running any actors. Uses the Codex planner when `OPENAI_API_KEY` and `WZRD_AGENT_PROVIDER=codex` are configured; otherwise falls back to a deterministic plan.
+    Generates a scraping plan without running any actors. Calls the Codex planner (OpenAI Responses API) when `OPENAI_API_KEY` is configured; otherwise falls back to a deterministic plan.
 
     ```json
     {
@@ -189,7 +189,7 @@ The edge function accepts `POST` requests with a JSON body. All actions require 
     ```
   </Tab>
   <Tab title="finalize">
-    Downloads media files from selected results, uploads them to the `project-assets` Supabase Storage bucket, and creates `project_assets` table rows with full Sourcify provenance metadata.
+    Downloads media files from selected results, uploads them to the `project-assets` Supabase Storage bucket, and creates `project_assets` table rows with full Sourcify provenance metadata. Up to **50 items** are processed per call.
 
     ```json
     {
@@ -263,7 +263,7 @@ type SourcifyResult = {
 </CardGroup>
 
 <Note>
-  Sourcify requires an **Apify API token** configured as the `APIFY_API_TOKEN` environment variable on the edge function. Without it, `plan` will succeed (Codex planning is independent), but `run` and `results` actions will return an error.
+  Sourcify requires an **Apify API token** configured as the `APIFY_API_TOKEN` environment variable on the edge function. Without it, `plan` will succeed (Codex planning calls OpenAI, not Apify), but `run` and `results` actions will return an error.
 </Note>
 
 <Tip>

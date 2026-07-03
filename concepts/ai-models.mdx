@@ -1,5 +1,5 @@
 ---
-title: "AI Models Available in WZRD Studio"
+title: "AI Model Catalog and Generation Routing in WZRD Studio"
 sidebarTitle: "AI Models"
 description: "WZRD Studio routes generation requests across image, video, audio, and text models. Learn what models are available and how routing works."
 ---
@@ -60,7 +60,7 @@ interface GenerationInput {
 
 interface ReferenceAsset {
   url: string;
-  type: 'image' | 'video' | 'audio' | 'text';
+  type: 'image' | 'video' | 'audio' | 'text' | 'model';
   role?: string; // e.g. 'input_image', 'style_reference'
 }
 

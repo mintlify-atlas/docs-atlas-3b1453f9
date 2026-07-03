@@ -1,5 +1,5 @@
 ---
-title: "Credits: WZRD Studio AI Usage Metering"
+title: "Credits: How WZRD Studio Meters AI Generation Usage"
 sidebarTitle: "Credits"
 description: "Credits are consumed for every AI generation in WZRD Studio. Learn how credits are charged per operation and how to manage your balance."
 ---
@@ -123,7 +123,7 @@ Your credit balance is visible in several places:
 
 - **Dashboard stats bar** — the **Credits** stat card on `/home` shows your available balance, updated on every page load via the `useCredits()` hook.
 - **Settings → Billing** — navigate to `/settings/billing` for a detailed breakdown of usage history, current plan, and top-up options.
-- **API** — poll `GET /functions/v1/billing-portal` to retrieve `{ subscription, credits }` programmatically.
+- **API** — call `GET /functions/v1/billing-catalog` to retrieve `{ subscription, wallet, plans, credit_packs }` programmatically. The `wallet` field contains your current credit balance.
 
 ```typescript
 // Using the useCredits hook inside any React component
@@ -172,13 +172,13 @@ try {
     Go to **Settings → Billing** at `/settings/billing`, or click **Billing &amp; Credits** in the dashboard settings dropdown.
   </Step>
   <Step title="Choose a plan or credit pack">
-    Select a subscription plan (`plan`) or a one-time credit pack (`pack`). Available codes include `pro` for the Pro plan and `pack_100` for a 100-credit top-up.
+    Select a subscription plan (`checkout_mode: "subscription"`) or a one-time credit pack (`checkout_mode: "pack"`). Example plan codes include `pro` for the Pro plan; example pack codes include `pack_100` for a 100-credit top-up.
   </Step>
   <Step title="Complete Stripe checkout">
     WZRD creates a Stripe Checkout session and opens it in your browser. Payment is handled entirely by Stripe — WZRD never stores card details.
   </Step>
   <Step title="Credits are applied instantly">
-    Once payment completes, your balance updates immediately. Poll `GET /functions/v1/billing-portal` to confirm the new credit total.
+    Once payment completes, your balance updates immediately. Call `GET /functions/v1/billing-catalog` and check the `wallet.available_total` field to confirm the new credit total.
   </Step>
 </Steps>
 
@@ -191,23 +191,34 @@ You can initiate a checkout session directly via the Supabase Edge Function if y
 curl -X POST https://<project>.supabase.co/functions/v1/billing-checkout \
   -H "Authorization: Bearer <supabase-jwt>" \
   -H "Content-Type: application/json" \
-  -d '{ "kind": "pack", "code": "pack_100" }'
+  -d '{ "checkout_mode": "pack", "pack_code": "pack_100" }'
 
 # Response
 { "checkout_url": "https://checkout.stripe.com/..." }
 ```
 
 ```bash
-# Poll plan and credit status
-curl https://<project>.supabase.co/functions/v1/billing-portal \
-  -H "Authorization: Bearer <supabase-jwt>"
+# Start a Stripe checkout for a subscription plan
+curl -X POST https://<project>.supabase.co/functions/v1/billing-checkout \
+  -H "Authorization: Bearer <supabase-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{ "checkout_mode": "subscription", "plan_code": "pro" }'
 
 # Response
-{ "subscription": { ... }, "credits": 97 }
+{ "checkout_url": "https://checkout.stripe.com/..." }
+```
+
+```bash
+# Retrieve plan status and credit balance
+curl https://<project>.supabase.co/functions/v1/billing-catalog \
+  -H "Authorization: Bearer <supabase-jwt>"
+
+# Response (abbreviated)
+{ "subscription": { ... }, "wallet": { "available_total": 97 }, "plans": [...], "credit_packs": [...] }
 ```
 
 <Tip>
-  The `billing-checkout` agent skill wraps this endpoint for use in automated workflows. Pass `{ "kind": "plan" | "pack", "code": "pro" | "pack_100" }` to the skill and open the returned `checkout_url` in a browser window.
+  The `billing-checkout` agent skill wraps this endpoint for use in automated workflows. Pass `{ "checkout_mode": "pack", "pack_code": "pack_100" }` or `{ "checkout_mode": "subscription", "plan_code": "pro" }` and open the returned `checkout_url` in a browser window.
 </Tip>
 
 ## Credit Cost Helpers
